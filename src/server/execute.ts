@@ -72,8 +72,13 @@ async function buildPaperclipRunEnv(ctx: AdapterExecutionContext, runtime: Prime
   if (ctx.authToken) env.PAPERCLIP_API_KEY = ctx.authToken;
   return { cwd, env };
 }
+class RunCancelledError extends Error {}
+const throwIfAborted = (ctx: AdapterExecutionContext) => { if (ctx.signal?.aborted) throw new RunCancelledError("Run cancelled before prime-agent started."); };
+const cancelledResult = (message: string): AdapterExecutionResult =>
+  ({ exitCode: 1, signal: null, timedOut: false, errorCode: "prime_run_cancelled", errorMessage: message, clearSession: false });
 /** errorMeta.primeErrorCode: the `code` of any adapter error class (codes start with "prime_"), else null. */
 function preflightFailure(err: unknown): AdapterExecutionResult {
+  if (err instanceof RunCancelledError) return cancelledResult(err.message);
   const code = err instanceof Error ? (err as Error & { code?: unknown }).code : undefined;
   const primeErrorCode = typeof code === "string" && code.startsWith("prime_") ? code : null;
   const errorMessage = err instanceof Error ? err.message : String(err);
@@ -85,16 +90,21 @@ async function prepareRun(ctx: AdapterExecutionContext, startedAtMs: number): Pr
   if (adapterExecutionTargetIsRemote(target)) {
     throw new Error(`prime_agent_local runs only on the local Paperclip host in phase 1; refusing ${describeAdapterExecutionTarget(target)}.`);
   }
+  throwIfAborted(ctx);
   const runtime = resolvePrimeRuntimeConfig(ctx.config, ctx.agent, resolvePaperclipInstanceRootForAdapter());
   const { cwd, env: paperclipEnv } = await buildPaperclipRunEnv(ctx, runtime);
   const { env: childEnv } = buildPrimeChildEnv(process.env, runtime.agentDir, paperclipEnv);
+  throwIfAborted(ctx);
   const version = await readPrimeVersion({ command: runtime.command, env: childEnv, cwd });
   if (!isSupportedPrimeVersion(version)) {
     const { min, maxExclusive } = PRIME_SUPPORTED_VERSION_RANGE;
     throw new PrimeCliError("prime_cli_version_unsupported", `prime-agent ${version} is not supported; supported range is >= ${min} and < ${maxExclusive}.`);
   }
+  throwIfAborted(ctx);
   const seeded = await seedPrimeAgentDir(runtime.agentDir, { provider: runtime.provider, env: paperclipEnv });
+  throwIfAborted(ctx);
   assertPrimeModelListed(runtime.modelRef, await listPrimeModels({ command: runtime.command, env: childEnv, cwd }));
+  throwIfAborted(ctx);
   const skills = await stagePrimeSkills(ctx.config);
   const deadlineMs = runtime.timeoutSec > 0 ? startedAtMs + runtime.timeoutSec * 1000 : null;
   return { runtime, cwd, paperclipEnv, childEnv, seeded, skills, deadlineMs };
@@ -167,6 +177,7 @@ async function runAttempt(ctx: AdapterExecutionContext, prep: PreparedRun, syste
     env: buildInvocationEnvForLogs(loggedEnv, { runtimeEnv, includeRuntimeKeys: ["HOME"], resolvedCommand }),
     prompt, promptMetrics: { systemPromptChars: system.text.length, promptChars: prompt.length }, context: ctx.context,
   });
+  throwIfAborted(ctx);
   const lines = lineBufferedLog(ctx.onLog);
   const proc = await runChildProcess(ctx.runId, runtime.command, args, {
     cwd,
@@ -250,7 +261,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     return preflightFailure(err);
   }
   try {
+    await ctx.onCancellationReady?.(); // A18: the host registers the execution control here
     return await runPrime(ctx, prep);
+  } catch (err) {
+    if (err instanceof RunCancelledError) return cancelledResult(err.message);
+    throw err;
   } finally {
     await prep.skills.cleanup();
   }

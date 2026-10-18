@@ -257,3 +257,21 @@ describe("execute: CLI checks before seeding and spawn (INTERFACES §11.3, §8, 
     expect(calls().map((call) => call.argv.slice(0, 2))).toEqual([["--version"], ["model", "list"]]);
   });
 });
+describe("execute: cancellation (INTERFACES §11.2, §16 A18)", () => {
+  it("does not call prime-agent when the signal is already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const { result } = await run({ signal: controller.signal });
+    const cancelled = { errorCode: "prime_run_cancelled", errorMessage: "Run cancelled before prime-agent started.", clearSession: false };
+    expect(result).toEqual({ exitCode: 1, signal: null, timedOut: false, ...cancelled });
+    expect(calls()).toEqual([]);
+  });
+  it("opts in to host cancellation after preflight and does not spawn when the signal aborts there (A18)", async () => {
+    const controller = new AbortController();
+    const made = makeCtx({ signal: controller.signal });
+    let ready = 0;
+    made.ctx.onCancellationReady = async () => void (ready++, controller.abort());
+    const result = await execute(made.ctx);
+    expect([result.errorCode, ready, calls().length, runCalls().length]).toEqual(["prime_run_cancelled", 1, 2, 0]);
+  });
+});
