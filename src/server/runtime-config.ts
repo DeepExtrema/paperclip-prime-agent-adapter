@@ -198,6 +198,10 @@ async function assertHostAuthFile(hostAuthFile: string): Promise<void> {
   try {
     stat = await fs.stat(hostAuthFile);
   } catch (err) {
+    const errno = (err as NodeJS.ErrnoException).code;
+    if (errno !== "ENOENT" && errno !== "ENOTDIR") {
+      throw new PrimeCredentialError("prime_host_auth_unsafe", `Cannot read host Prime auth file ${hostAuthFile} (${errno ?? "unknown errno"}).`, { cause: err });
+    }
     const hint = "Log in with prime-agent (/login) on the host, or set credentialMode to api_key.";
     throw new PrimeCredentialError("prime_host_auth_missing", `Host Prime auth file not found: ${hostAuthFile}. ${hint}`, { cause: err });
   }

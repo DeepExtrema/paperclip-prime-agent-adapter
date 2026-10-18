@@ -224,3 +224,15 @@ describe("assertPrimeCwdAllowed (INTERFACES §16 A15)", () => {
     }
   });
 });
+
+describe("seedPrimeAgentDir host auth errno mapping (code review F2)", () => {
+  it("reports a host auth symlink loop as unsafe and preserves its errno and cause", async () => {
+    const loop = path.join(root, "host-auth-loop.json");
+    await fs.symlink(loop, loop);
+    const error = await seedPrimeAgentDir(agentPlan({ mode: "host_auth", hostAuthFile: loop }), { provider: "anthropic", env: {} })
+      .then(() => null, (err: unknown) => err);
+    expect(error).toMatchObject({ code: "prime_host_auth_unsafe", cause: { code: "ELOOP" } });
+    expect((error as Error).message).toContain("ELOOP");
+    expect(await exists(path.join(agentPlan().agentDir, "auth.json"))).toBe(false);
+  });
+});
