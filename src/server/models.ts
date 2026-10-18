@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import type { AdapterModel } from "@paperclipai/adapter-utils";
 import { runChildProcess, type RunProcessResult } from "@paperclipai/adapter-utils/server-utils";
-import { notImplemented, PrimeCliError } from "../errors.js";
+import { PrimeCliError } from "../errors.js";
 import {
   PRIME_DEFAULT_COMMAND,
   type DetectPrimeModel,
@@ -134,9 +134,21 @@ export function assertPrimeModelListed(modelRef: string, models: AdapterModel[])
   throw new PrimeCliError("prime_model_unknown", `Configured Prime model is not listed: ${modelRef}. Listed models: ${sample || "(none)"}${models.length > 12 ? ", ..." : ""}`);
 }
 
-export const detectPrimeModel: DetectPrimeModel = async () => notImplemented("WP4", "detectPrimeModel");
+export const detectPrimeModel: DetectPrimeModel = async (agentDir) => {
+  const source = path.join(agentDir, "settings.json");
+  try {
+    const raw: unknown = JSON.parse(await fs.readFile(source, "utf8"));
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+    const { defaultProvider, defaultModel } = raw as Record<string, unknown>;
+    if (typeof defaultProvider !== "string" || !defaultProvider.trim() || typeof defaultModel !== "string" || !defaultModel.trim()) return null;
+    return { provider: defaultProvider, model: `${defaultProvider}/${defaultModel}`, source };
+  } catch {
+    return null;
+  }
+};
 
 /** ServerAdapterModule.detectModel: detectPrimeModel(<os.homedir()>/.prime/agent). */
 export async function detectPrimeModelForAdapter(): ReturnType<DetectPrimeModel> {
-  return notImplemented("WP4", "detectPrimeModelForAdapter");
+  const detected = await detectPrimeModel(path.join(os.homedir(), ".prime", "agent"));
+  return detected ? { ...detected, source: "~/.prime/agent/settings.json" } : null;
 }

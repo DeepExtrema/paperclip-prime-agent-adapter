@@ -217,3 +217,28 @@ describe("adapter model listing (INTERFACES §8)", () => {
     expect(runChildProcess).not.toHaveBeenCalled();
   });
 });
+
+
+describe("model detection (INTERFACES §8)", () => {
+  async function agentDirWith(settings: string | null): Promise<string> {
+    const dir = await makeScratch();
+    if (settings !== null) await fs.writeFile(path.join(dir, "settings.json"), settings);
+    return dir;
+  }
+  it("returns provider, provider/model and the settings path when both defaults are set", async () => {
+    const dir = await agentDirWith('{"defaultProvider":"anthropic","defaultModel":"claude-haiku-4-5","theme":"dark"}');
+    await expect(models.detectPrimeModel(dir)).resolves.toEqual({ provider: "anthropic", model: "anthropic/claude-haiku-4-5", source: path.join(dir, "settings.json") });
+  });
+  it("returns null for a missing file, bad JSON, null or empty defaults", async () => {
+    const cases = [null, "{oops", "[]", '{"defaultProvider":null,"defaultModel":null}', '{"defaultProvider":"anthropic","defaultModel":""}', '{"defaultProvider":"","defaultModel":"m"}', '{"defaultProvider":"anthropic","defaultModel":7}'];
+    for (const settings of cases) await expect(models.detectPrimeModel(await agentDirWith(settings))).resolves.toBeNull();
+  });
+  it("detectPrimeModelForAdapter reads <home>/.prime/agent/settings.json and reports a ~ source", async () => {
+    const home = await makeScratch();
+    vi.stubEnv("HOME", home);
+    await expect(models.detectPrimeModelForAdapter()).resolves.toBeNull();
+    await fs.mkdir(path.join(home, ".prime", "agent"), { recursive: true });
+    await fs.writeFile(path.join(home, ".prime", "agent", "settings.json"), '{"defaultProvider":"openai-codex","defaultModel":"gpt-6.1-sol"}');
+    await expect(models.detectPrimeModelForAdapter()).resolves.toEqual({ provider: "openai-codex", model: "openai-codex/gpt-6.1-sol", source: "~/.prime/agent/settings.json" });
+  });
+});
