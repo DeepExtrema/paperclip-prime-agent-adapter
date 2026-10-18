@@ -40,6 +40,12 @@ function toAdapterModels(rows: PrimeModelRow[]): AdapterModel[] {
 /** Uncached `<command> model list`. Throws PrimeCliError. */
 async function discoverPrimeModels({ command, env, cwd }: Parameters<ListPrimeModels>[0]): Promise<AdapterModel[]> {
   const agentDir = env.PRIME_AGENT_CODING_AGENT_DIR;
+  const home = os.homedir();
+  const expandedAgentDir = agentDir === "~" ? home : agentDir?.startsWith("~/") ? path.join(home, agentDir.slice(2)) : agentDir;
+  const hostAgentDir = path.resolve(home, ".prime", "agent");
+  if (expandedAgentDir && path.resolve(expandedAgentDir) === hostAgentDir) {
+    throw new PrimeCliError("prime_model_list_failed", `listPrimeModels refuses the host default agent dir: ${hostAgentDir}`);
+  }
   if (!agentDir || !path.isAbsolute(agentDir)) {
     throw new PrimeCliError("prime_model_list_failed", "listPrimeModels requires env.PRIME_AGENT_CODING_AGENT_DIR set to an absolute per-agent or ephemeral agent dir.");
   }

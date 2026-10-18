@@ -242,3 +242,24 @@ describe("model detection (INTERFACES §8)", () => {
     await expect(models.detectPrimeModelForAdapter()).resolves.toEqual({ provider: "openai-codex", model: "openai-codex/gpt-6.1-sol", source: "~/.prime/agent/settings.json" });
   });
 });
+
+describe("host default model directory (code review 1)", () => {
+  it("refuses the host default agent dir and never invokes the fake CLI", async () => {
+    const dir = await makeScratch();
+    const home = path.join(dir, "home");
+    vi.stubEnv("HOME", home);
+    const hostAgentDir = path.join(home, ".prime", "agent");
+    await fs.mkdir(hostAgentDir, { recursive: true });
+    const marker = path.join(dir, "spawned");
+    const command = await fakeCommand(dir, "prime-agent-fake", `touch "${marker}"`);
+    for (const agentDir of [hostAgentDir, `${hostAgentDir}/../agent/`, "~/.prime/agent"]) {
+      const env = { PATH: "/usr/bin:/bin", PRIME_AGENT_CODING_AGENT_DIR: agentDir };
+      await expect(models.listPrimeModels({ command, env, cwd: dir })).rejects.toMatchObject({
+        code: "prime_model_list_failed",
+        message: expect.stringContaining(hostAgentDir),
+      });
+    }
+    expect(runChildProcess).not.toHaveBeenCalled();
+    await expect(fs.stat(marker)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+});
