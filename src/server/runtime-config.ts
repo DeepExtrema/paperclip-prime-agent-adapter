@@ -111,8 +111,20 @@ export const resolvePrimeRuntimeConfig: ResolvePrimeRuntimeConfig = (config, age
 // §3 agent dir
 export const seedPrimeAgentDir: SeedPrimeAgentDir = async () => notImplemented("WP1", "seedPrimeAgentDir");
 
-export const createEphemeralPrimeAgentDir: CreateEphemeralPrimeAgentDir = async () =>
-  notImplemented("WP1", "createEphemeralPrimeAgentDir");
+export const createEphemeralPrimeAgentDir: CreateEphemeralPrimeAgentDir = async (credential) => {
+  const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-prime-agent-"));
+  const sessionDir = path.join(agentDir, "sessions");
+  const cleanup = async (): Promise<void> => {
+    await fs.rm(agentDir, { recursive: true, force: true }).catch(() => undefined);
+  };
+  try {
+    await fs.mkdir(sessionDir, { mode: 0o700 });
+  } catch (err) {
+    await cleanup();
+    throw err;
+  }
+  return { plan: { kind: "ephemeral", agentDir, sessionDir, credential }, cleanup };
+};
 
 // §4 buildPrimeChildEnv
 function hasPrefix(key: string, prefixes: readonly string[]): boolean {
