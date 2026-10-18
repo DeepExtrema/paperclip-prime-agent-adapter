@@ -107,9 +107,11 @@ export async function refreshPrimeModelsForAdapter(): Promise<AdapterModel[]> {
   return notImplemented("WP4", "refreshPrimeModelsForAdapter");
 }
 
-/** A9: throws PrimeCliError("prime_model_unknown") when modelRef is not in models. */
-export function assertPrimeModelListed(_modelRef: string, _models: AdapterModel[]): void {
-  return notImplemented("WP4", "assertPrimeModelListed");
+/** Model check for execute and testEnvironment (INTERFACES §8). Throws PrimeCliError("prime_model_unknown"). */
+export function assertPrimeModelListed(modelRef: string, models: AdapterModel[]): void {
+  if (models.some((entry) => entry.id === modelRef)) return;
+  const sample = models.slice(0, 12).map((entry) => entry.id).join(", ");
+  throw new PrimeCliError("prime_model_unknown", `Configured Prime model is not listed: ${modelRef}. Listed models: ${sample || "(none)"}${models.length > 12 ? ", ..." : ""}`);
 }
 
 export const detectPrimeModel: DetectPrimeModel = async () => notImplemented("WP4", "detectPrimeModel");

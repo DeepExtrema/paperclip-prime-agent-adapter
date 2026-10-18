@@ -150,3 +150,23 @@ describe("model list cache (INTERFACES §8)", () => {
     expect(await runs()).toBe(6);
   });
 });
+
+
+describe("model check (INTERFACES §8)", () => {
+  it("accepts a listed id and refuses anything else with up to 12 sample ids", () => {
+    const listed = Array.from({ length: 13 }, (_, i) => ({ id: `anthropic/m-${i}`, label: `anthropic/m-${i}` }));
+    expect(() => models.assertPrimeModelListed("anthropic/m-12", listed)).not.toThrow();
+    const sample = listed.slice(0, 12).map((m) => m.id).join(", ");
+    expect(() => models.assertPrimeModelListed("anthropic/claude-nope", listed)).toThrow(
+      new PrimeCliError("prime_model_unknown", `Configured Prime model is not listed: anthropic/claude-nope. Listed models: ${sample}, ...`),
+    );
+    expect(() => models.assertPrimeModelListed("anthropic/m-0", [])).toThrow("Configured Prime model is not listed: anthropic/m-0. Listed models: (none)");
+    try {
+      models.assertPrimeModelListed("m-0", listed);
+      expect.unreachable();
+    } catch (err) {
+      expect(err).toBeInstanceOf(PrimeCliError);
+      expect(err).toMatchObject({ code: "prime_model_unknown" });
+    }
+  });
+});
