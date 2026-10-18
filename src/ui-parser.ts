@@ -55,12 +55,20 @@ function assistantEntries(state: ParserState, message: Record<string, unknown>, 
   return entries;
 }
 
+/** Tool result from the toolResult-role message (INTERFACES §16 A5): text items, else the content as JSON. */
+function toolResultEntry(message: Record<string, unknown>, ts: string): UiTranscriptEntry {
+  const text = joinItems(message.content, "text", "text");
+  return { kind: "tool_result", ts, toolUseId: asString(message.toolCallId), toolName: asString(message.toolName, "tool"),
+    content: text || JSON.stringify(message.content ?? null), isError: message.isError === true };
+}
+
 function parseEvent(state: ParserState, event: Record<string, unknown>, raw: string, ts: string): UiTranscriptEntry[] {
   const type = asString(event.type);
   if (type === "session") return [{ kind: "init", ts, model: state.model, sessionId: asString(event.id) }];
   if (type === "message_end") {
     const message = asRecord(event.message);
     if (message?.role === "assistant") return assistantEntries(state, message, ts);
+    if (message?.role === "toolResult") return [toolResultEntry(message, ts)];
     if (message?.role === "user") {
       const text = joinItems(message.content, "text", "text");
       return text ? [{ kind: "user", ts, text }] : [];

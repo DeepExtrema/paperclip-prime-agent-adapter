@@ -71,3 +71,21 @@ describe("message_end: provider error", () => {
     expect(parseStdoutLine(raw, TS)).toEqual([{ kind: "stderr", ts: TS, text: "Prime provider request failed." }]);
   });
 });
+
+describe("message_end: toolResult (INTERFACES §16 A5)", () => {
+  const toolResult = (content: unknown, isError: boolean) =>
+    JSON.stringify({ type: "message_end", message: { role: "toolResult", toolCallId: "t1", toolName: "ipython", content, isError } });
+  it("maps a toolResult message to tool_result with the joined text content", () => {
+    expect(parseStdoutLine(line("run4", 31), TS)).toEqual([
+      { kind: "tool_result", ts: TS, toolUseId: "toolu_01D1iEqtRH3v2sCKAY59YkLF", toolName: "ipython", content: "42\n", isError: false },
+    ]);
+  });
+  it("keeps isError true and falls back to JSON when there is no text content", () => {
+    expect(parseStdoutLine(toolResult([{ type: "text", text: "boom" }], true), TS)).toEqual([
+      { kind: "tool_result", ts: TS, toolUseId: "t1", toolName: "ipython", content: "boom", isError: true },
+    ]);
+    expect(parseStdoutLine(toolResult([{ type: "image", data: "AA==" }], false), TS)).toEqual([
+      { kind: "tool_result", ts: TS, toolUseId: "t1", toolName: "ipython", content: '[{"type":"image","data":"AA=="}]', isError: false },
+    ]);
+  });
+});
