@@ -7,7 +7,7 @@ import {
   asBoolean, asNumber, asStringArray, ensurePathInEnv, parseObject, resolvePaperclipInstanceRootForAdapter,
   sanitizeInheritedPaperclipEnv,
 } from "@paperclipai/adapter-utils/server-utils";
-import { notImplemented, PrimeConfigError, PrimeCredentialError } from "../errors.js";
+import { PrimeConfigError, PrimeCredentialError } from "../errors.js";
 import {
   PRIME_ADAPTER_OWNED_ENV_KEYS, PRIME_ALWAYS_STRIPPED_ENV_PREFIXES, PRIME_DEFAULT_COMMAND, PRIME_PROVIDER_CREDENTIAL_ENV_KEYS,
   PRIME_STRIPPED_ENV_PREFIXES, PRIME_THINKING_LEVELS, type BuildPrimeChildEnv, type CreateEphemeralPrimeAgentDir,
@@ -298,6 +298,19 @@ export const buildPrimeChildEnv: BuildPrimeChildEnv = (base, plan, paperclipEnv)
 // §16 A15
 
 /** INTERFACES §16 A15/A16 (stub until WP1). Rejects with PrimeConfigError("prime_path_invalid") for a protected cwd. */
-export async function assertPrimeCwdAllowed(_cwd: string): Promise<void> {
-  return notImplemented("WP1", "assertPrimeCwdAllowed");
+/** §16 A15 (corrected): refuse an execution cwd inside ~/.prime/agent or Paperclip state, before any mkdir.
+ * Paperclip state = the Paperclip home (resolved and ~/.paperclip) except <instanceRoot>/workspaces/* and projects/*.
+ * HOME and the instance root are read on every call (never at import time): tests and WP3 change HOME at runtime. Real paths. */
+export async function assertPrimeCwdAllowed(cwd: string): Promise<void> {
+  if (!path.isAbsolute(cwd)) throw new PrimeConfigError("prime_path_invalid", `cwd must be an absolute path: ${cwd}`);
+  const instanceRoot = resolvePaperclipInstanceRootForAdapter();
+  const [realCwd, primeAgentDir, ...paperclipHomes] = await Promise.all(
+    [cwd, path.join(os.homedir(), ".prime", "agent"), path.dirname(path.dirname(instanceRoot)), path.join(os.homedir(), ".paperclip")].map(canonicalPath),
+  );
+  const workspaceRoots = await Promise.all(["workspaces", "projects"].map((entry) => canonicalPath(path.join(instanceRoot, entry))));
+  const inWorkspace = workspaceRoots.some((root) => realCwd !== root && isSameOrInside(realCwd, root));
+  const refused = isSameOrInside(realCwd, primeAgentDir) || (!inWorkspace && paperclipHomes.some((home) => isSameOrInside(realCwd, home)));
+  if (refused) {
+    throw new PrimeConfigError("prime_path_invalid", `cwd ${cwd} (real path ${realCwd}) is inside Prime or Paperclip state.`);
+  }
 }

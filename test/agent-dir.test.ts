@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { resolvePaperclipInstanceRootForAdapter } from "@paperclipai/adapter-utils/server-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createEphemeralPrimeAgentDir, seedPrimeAgentDir } from "../src/server/runtime-config.js";
+import { assertPrimeCwdAllowed, createEphemeralPrimeAgentDir, seedPrimeAgentDir } from "../src/server/runtime-config.js";
 import type { PrimeAgentDirPlan, PrimeCredentialConfig } from "../src/types.js";
 // L1: HOME, TMPDIR and the Paperclip instance root point into a fresh temp root for every test.
 let root = "";
@@ -191,5 +191,36 @@ describe("seedPrimeAgentDir agent dir safety (INTERFACES §3 step 1, L6)", () =>
   it("refuses an auth.json that is a directory", async () => {
     await fs.mkdir(path.join(agentPlan().agentDir, "auth.json"), { recursive: true });
     expect(await seedErrorCode(agentPlan())).toBe("prime_agent_dir_unsafe");
+  });
+});
+
+describe("assertPrimeCwdAllowed (INTERFACES §16 A15)", () => {
+  const cwdCode = (cwd: string) => assertPrimeCwdAllowed(cwd).then(() => "no error", (err: { code?: string }) => err.code ?? String(err));
+  it.each([
+    ["home", ".prime/agent"], ["home", ".prime/agent/kernel-venv"], ["home", ".paperclip"], ["instance", "secrets"], ["instance", "db"],
+    ["instance", "data/backups"], ["instance", "logs"], ["instance", "companies/c1/agents/a1/prime-agent-home"], ["instance", "ai-local-logins"],
+    ["instance", "../../cli"],
+  ])(
+    "refuses a cwd inside the %s path %s",
+    async (base, entry) => {
+      const cwd = path.join(base === "home" ? home : path.join(root, "paperclip/instances/default"), entry, "x");
+      expect(await cwdCode(cwd)).toBe("prime_path_invalid");
+    },
+  );
+  it("refuses a relative cwd and a cwd whose real path is inside ~/.prime/agent", async () => {
+    await fs.symlink(path.join(home, ".prime", "agent"), path.join(root, "ws-link"));
+    expect([await cwdCode("relative/dir"), await cwdCode(path.join(root, "ws-link", "sub"))]).toEqual(["prime_path_invalid", "prime_path_invalid"]);
+  });
+  it("reads HOME per call, not at import time", async () => {
+    const cwd = path.join(home, ".prime", "agent", "x");
+    const before = await cwdCode(cwd);
+    vi.stubEnv("HOME", path.join(root, "other-home"));
+    expect([before, await cwdCode(cwd)]).toEqual(["prime_path_invalid", "no error"]);
+  });
+  it("allows Paperclip workspace and project dirs, the home dir and ~/.prime", async () => {
+    const instance = path.join(root, "paperclip/instances/default");
+    for (const cwd of [path.join(instance, "workspaces/agent-1"), path.join(instance, "projects/c1/p1/_default"), home, path.join(home, ".prime")]) {
+      expect(await cwdCode(cwd)).toBe("no error");
+    }
   });
 });
