@@ -1,0 +1,112 @@
+import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import type { AdapterEnvironmentTestContext, AdapterEnvironmentTestResult } from "@paperclipai/adapter-utils";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { PrimeCliError, PrimeConfigError, PrimeCredentialError } from "../src/errors.js";
+import { testEnvironment } from "../src/server/test.js";
+import type { PrimeAgentDirPlan, PrimeCredentialConfig, PrimeRuntimeConfig } from "../src/types.js";
+
+// WP1 (runtime-config) and WP4 (models) are stubs on this branch: test doubles stand in for
+// their frozen contracts (INTERFACES.md §2-§4, §8, §16 A8-A9, A16). version.ts is real and runs a fake CLI script.
+const mocks = vi.hoisted(() => ({
+  resolvePrimeRuntimeConfig: vi.fn(), seedPrimeAgentDir: vi.fn(), createEphemeralPrimeAgentDir: vi.fn(), buildPrimeChildEnv: vi.fn(),
+  assertPrimeCwdAllowed: vi.fn(), listPrimeModels: vi.fn(), assertPrimeModelListed: vi.fn(),
+}));
+vi.mock("../src/server/runtime-config.js", () => ({ ...mocks }));
+vi.mock("../src/server/models.js", () => ({ ...mocks }));
+
+const MODEL_REF = "anthropic/claude-haiku-4-5";
+let root: string;
+let workDir: string;
+let ephemeralDirs: string[];
+let cleanups: Array<ReturnType<typeof vi.fn>>;
+
+function runtime(overrides: Partial<PrimeRuntimeConfig> = {}): PrimeRuntimeConfig {
+  const credential: PrimeCredentialConfig = { mode: "host_auth", hostAuthFile: path.join(root, "host-auth.json") };
+  const agentDir = path.join(root, "agents", "agent-1", "prime-agent-home");
+  return {
+    command: path.join(root, "bin", "prime-agent"), modelRef: MODEL_REF, provider: "anthropic", model: "claude-haiku-4-5",
+    thinking: null, cwd: workDir, instructionsFilePath: null, promptTemplate: null, bootstrapPromptTemplate: null,
+    appendSystemPrompt: null, noContextFiles: false, timeoutSec: 0, graceSec: 20, extraArgs: [], env: {}, credential,
+    agentDir: { kind: "agent", agentDir, sessionDir: path.join(agentDir, "sessions"), credential },
+    ...overrides,
+  };
+}
+
+async function writeFakePrime(versionLine: string): Promise<string> {
+  const file = path.join(root, "bin", "prime-agent");
+  await mkdir(path.dirname(file), { recursive: true });
+  await writeFile(file, `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "${versionLine}"; exit 0; fi\nexit 2\n`);
+  await chmod(file, 0o755);
+  return file;
+}
+
+function ctx(overrides: Partial<AdapterEnvironmentTestContext> = {}): AdapterEnvironmentTestContext {
+  return { companyId: "company-1", adapterType: "prime_agent_local", config: { model: MODEL_REF }, ...overrides };
+}
+
+const codes = (result: AdapterEnvironmentTestResult): string[] => result.checks.map((entry) => entry.code);
+
+function check(result: AdapterEnvironmentTestResult, code: string) {
+  const found = result.checks.find((entry) => entry.code === code);
+  if (!found) throw new Error(`no check ${code} in ${codes(result).join(",")}`);
+  return found;
+}
+
+beforeEach(async () => {
+  root = await mkdtemp(path.join(os.tmpdir(), "wp5-envtest-"));
+  workDir = path.join(root, "work");
+  await mkdir(workDir);
+  ephemeralDirs = [];
+  cleanups = [];
+  await writeFakePrime("0.10.0");
+  mocks.resolvePrimeRuntimeConfig.mockReset().mockImplementation(() => runtime());
+  mocks.assertPrimeCwdAllowed.mockReset().mockResolvedValue(undefined);
+  mocks.createEphemeralPrimeAgentDir.mockReset().mockImplementation(async (credential: PrimeCredentialConfig) => {
+    const agentDir = await mkdtemp(path.join(root, "ephemeral-"));
+    ephemeralDirs.push(agentDir);
+    const cleanup = vi.fn(async () => rm(agentDir, { recursive: true, force: true }));
+    cleanups.push(cleanup);
+    const plan: PrimeAgentDirPlan = { kind: "ephemeral", agentDir, sessionDir: path.join(agentDir, "sessions"), credential };
+    return { plan, cleanup };
+  });
+  mocks.buildPrimeChildEnv.mockReset().mockImplementation((_base: NodeJS.ProcessEnv, plan: PrimeAgentDirPlan, extra: Record<string, string>) => ({
+    env: { PATH: "/usr/bin:/bin", ...extra, PRIME_AGENT_CODING_AGENT_DIR: plan.agentDir, PRIME_AGENT_TELEMETRY: "0" },
+    droppedKeys: [],
+  }));
+  mocks.seedPrimeAgentDir
+    .mockReset()
+    .mockImplementation(async (plan: PrimeAgentDirPlan) => ({ plan, auth: "host_auth_symlink", billingType: "subscription", notes: [] }));
+  const ids = ["anthropic/claude-haiku-4-5", "anthropic/claude-opus-5-5"];
+  mocks.listPrimeModels.mockReset().mockResolvedValue(ids.map((id) => ({ id, label: id })));
+  mocks.assertPrimeModelListed.mockReset().mockImplementation((modelRef: string, models: Array<{ id: string }>) => {
+    if (!models.some((entry) => entry.id === modelRef)) throw new PrimeCliError("prime_model_unknown", `${modelRef} is not listed`);
+  });
+});
+
+afterEach(async () => {
+  await rm(root, { recursive: true, force: true });
+});
+
+describe("testEnvironment: execution target (INTERFACES.md §10)", () => {
+  it("refuses a remote execution target before any other step", async () => {
+    const executionTarget = { kind: "remote", transport: "ssh", remoteCwd: "/srv/work", spec: {} } as never;
+    const result = await testEnvironment(ctx({ executionTarget }));
+    expect(result).toEqual({
+      adapterType: "prime_agent_local",
+      status: "fail",
+      checks: [{ code: "prime_config_invalid", level: "error", message: "remote execution targets are not supported in phase 1" }],
+      testedAt: expect.any(String),
+    });
+    expect(new Date(result.testedAt).toISOString()).toBe(result.testedAt);
+    expect(mocks.resolvePrimeRuntimeConfig).not.toHaveBeenCalled();
+    expect(mocks.createEphemeralPrimeAgentDir).not.toHaveBeenCalled();
+  });
+
+  it("accepts an explicit local execution target", async () => {
+    const result = await testEnvironment(ctx({ executionTarget: { kind: "local" } }));
+    expect(codes(result)).not.toContain("prime_config_invalid");
+    expect(result.adapterType).toBe("prime_agent_local");
+  });
+});
