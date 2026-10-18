@@ -30,6 +30,9 @@ if [ ! -f "$repo_root/dist/index.js" ]; then
 fi
 
 auth=()
+if [ -n "${PAPERCLIP_BOARD_TOKEN:-}" ]; then
+  auth=(-H "Authorization: Bearer ${PAPERCLIP_BOARD_TOKEN}")
+fi
 body="$(node -e 'process.stdout.write(JSON.stringify({ packageName: process.argv[1], isLocalPath: true }))' "$repo_root")"
 curl -sS -o /dev/null -X POST "$api_url/adapters/install" -H 'Content-Type: application/json' "${auth[@]}" -d "$body"
 curl -sS -o /dev/null "${auth[@]}" "$api_url/adapters/prime_agent_local"

@@ -76,4 +76,14 @@ describe("scripts/install-local.sh", () => {
     expect(result.code).toBe(2);
     expect(result.stderr).toBe("usage: scripts/install-local.sh --api-url <http://host:port/api> [--skip-build]\n");
   });
+  it("sends PAPERCLIP_BOARD_TOKEN as a bearer token", async () => {
+    const stub = await stubPaperclip(201, loaded);
+    try {
+      const result = await runScript(["--api-url", stub.apiUrl, "--skip-build"], { PAPERCLIP_BOARD_TOKEN: "test-token" });
+      expect(result.code, result.stderr).toBe(0);
+      expect(stub.seen.map((r) => r.auth)).toEqual(["Bearer test-token", "Bearer test-token"]);
+    } finally {
+      await stub.close();
+    }
+  });
 });
