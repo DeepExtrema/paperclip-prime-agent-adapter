@@ -23,3 +23,9 @@ describe("line classification", () => {
     expect(parseStdoutLine(` ${raw} `, TS)).toEqual([{ kind: "stdout", ts: TS, text: raw }]);
   });
 });
+
+describe("session event", () => {
+  it("maps session to init with the session id", () => {
+    expect(parseStdoutLine(line("run2", 1), TS)).toEqual([{ kind: "init", ts: TS, model: "", sessionId: "01a14c2a-5965-7269-8920-97d0da73b791" }]);
+  });
+});

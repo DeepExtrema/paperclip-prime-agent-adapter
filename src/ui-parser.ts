@@ -43,6 +43,7 @@ function errorText(message: Record<string, unknown>): string {
 
 function parseEvent(state: ParserState, event: Record<string, unknown>, raw: string, ts: string): UiTranscriptEntry[] {
   const type = asString(event.type);
+  if (type === "session") return [{ kind: "init", ts, model: state.model, sessionId: asString(event.id) }];
   return [{ kind: "stdout", ts, text: raw }]; // unknown event type
 }
 
