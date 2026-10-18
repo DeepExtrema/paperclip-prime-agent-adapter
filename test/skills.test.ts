@@ -1,0 +1,112 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import type { AdapterSkillContext } from "@paperclipai/adapter-utils";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { listPrimeSkills, stagePrimeSkills, syncPrimeSkills } from "../src/server/skills.js";
+
+let base: string;
+let sources: string;
+let tmp: string;
+beforeEach(async () => {
+  base = await fs.mkdtemp(path.join(os.tmpdir(), "wp4-skills-"));
+  sources = path.join(base, "sources");
+  tmp = path.join(base, "tmp");
+  await fs.mkdir(tmp);
+  for (const name of ["paperclip", "lint"]) {
+    await fs.mkdir(path.join(sources, name), { recursive: true });
+    await fs.writeFile(path.join(sources, name, "SKILL.md"), `# ${name}\n`);
+  }
+  vi.stubEnv("TMPDIR", tmp);
+});
+afterEach(async () => {
+  vi.unstubAllEnvs();
+  await fs.rm(base, { recursive: true, force: true });
+});
+function skillConfig(desiredSkills: string[], extra: Array<Record<string, unknown>> = []): Record<string, unknown> {
+  return {
+    paperclipRuntimeSkills: [
+      { key: "paperclipai/paperclip/paperclip", runtimeName: "paperclip", source: path.join(sources, "paperclip") },
+      { key: "acme/tools/lint", runtimeName: "lint", source: path.join(sources, "lint") },
+      { key: "acme/tools/format", runtimeName: "format", source: path.join(sources, "format") },
+      { key: "acme/tools/gone", runtimeName: "gone", source: path.join(sources, "gone"), sourceStatus: "missing" },
+      ...extra,
+    ],
+    paperclipSkillSync: { desiredSkills },
+  };
+}
+const ctx = (config: Record<string, unknown>): AdapterSkillContext => ({ agentId: "agent-1", companyId: "company-1", adapterType: "prime_agent_local", config });
+
+describe("skill snapshot (INTERFACES §9)", () => {
+  it("reports desired skills as configured (never installed) in ephemeral mode", async () => {
+    const snapshot = await listPrimeSkills(ctx(skillConfig(["lint", "gone", "acme/tools/absent"])));
+    expect(snapshot).toMatchObject({
+      adapterType: "prime_agent_local",
+      supported: true,
+      mode: "ephemeral",
+      desiredSkills: ["paperclipai/paperclip/paperclip", "acme/tools/lint", "acme/tools/gone", "acme/tools/absent"],
+      warnings: ['Desired skill "acme/tools/absent" is not available from the Paperclip skills directory.'],
+    });
+    const byKey = Object.fromEntries(snapshot.entries.map((entry) => [entry.key, entry]));
+    expect(byKey["acme/tools/lint"]).toMatchObject({ state: "configured", desired: true, sourcePath: path.join(sources, "lint"), targetPath: null, detail: "Passed to Prime with --skill on the next run." });
+    expect(byKey["paperclipai/paperclip/paperclip"]).toMatchObject({ state: "configured", desired: true });
+    expect(byKey["acme/tools/format"]).toMatchObject({ state: "available", desired: false, detail: null });
+    expect(byKey["acme/tools/gone"]).toMatchObject({ state: "missing", desired: true });
+    expect(byKey["acme/tools/absent"]).toMatchObject({ state: "missing", desired: true, runtimeName: null });
+    expect(snapshot.entries.some((entry) => entry.state === "installed")).toBe(false);
+  });
+  it("syncPrimeSkills ignores its desired argument, writes nothing and returns the list snapshot", async () => {
+    const config = skillConfig(["lint"]);
+    const before = await fs.readdir(base, { recursive: true });
+    const synced = await syncPrimeSkills(ctx(config), ["acme/tools/format"]);
+    expect(synced).toEqual(await listPrimeSkills(ctx(config)));
+    expect(await fs.readdir(base, { recursive: true })).toEqual(before);
+  });
+});
+
+
+describe("skill staging (INTERFACES §9)", () => {
+  it("symlinks each desired, present skill into one temp dir and returns one --skill dir per skill", async () => {
+    const staged = await stagePrimeSkills(skillConfig(["lint", "gone", "acme/tools/absent"]));
+    const [root] = await fs.readdir(tmp);
+    expect(root).toMatch(/^paperclip-prime-skills-/);
+    const stagedRoot = path.join(tmp, root!);
+    expect(staged.skillDirs).toEqual([path.join(stagedRoot, "paperclip"), path.join(stagedRoot, "lint")]);
+    expect(staged.missing).toEqual(["gone", "acme/tools/absent"]);
+    expect(await fs.readlink(path.join(stagedRoot, "lint"))).toBe(path.join(sources, "lint"));
+    expect(await fs.readFile(path.join(stagedRoot, "lint", "SKILL.md"), "utf8")).toBe("# lint\n");
+    expect((await fs.readdir(stagedRoot)).sort()).toEqual(["lint", "paperclip"]);
+    await staged.cleanup();
+  });
+  it("cleanup removes the temp dir, keeps the skill sources and never throws", async () => {
+    const staged = await stagePrimeSkills(skillConfig(["lint"]));
+    await staged.cleanup();
+    await staged.cleanup();
+    expect(await fs.readdir(tmp)).toEqual([]);
+    expect(await fs.readFile(path.join(sources, "lint", "SKILL.md"), "utf8")).toBe("# lint\n");
+  });
+  it("reports a runtime name that is not a single path segment as missing and never links it (INTERFACES §16 A10)", async () => {
+    const escape = { key: "acme/tools/escape", runtimeName: "../escape", source: path.join(sources, "lint") };
+    const staged = await stagePrimeSkills(skillConfig(["acme/tools/escape"], [escape]));
+    expect(staged.skillDirs.map((dir) => path.basename(dir))).toEqual(["paperclip"]);
+    expect(staged.missing).toEqual(["../escape (unsafe runtime name: not a single path segment)"]);
+    await expect(fs.lstat(path.join(tmp, "escape"))).rejects.toMatchObject({ code: "ENOENT" });
+    await staged.cleanup();
+    expect(await fs.readdir(tmp)).toEqual([]);
+  });
+  it("stages only the operational skill when nothing else is desired", async () => {
+    const staged = await stagePrimeSkills(skillConfig([]));
+    expect(staged.skillDirs.map((dir) => path.basename(dir))).toEqual(["paperclip"]);
+    expect(staged.missing).toEqual([]);
+    await staged.cleanup();
+  });
+});
+
+describe("failed skill staging (INTERFACES §9, R-27)", () => {
+  it("removes the temp dir and rethrows the original symlink error", async () => {
+    const duplicate = { key: "acme/other/lint", runtimeName: "lint", source: path.join(sources, "paperclip") };
+    const error = await stagePrimeSkills(skillConfig(["acme/tools/lint", "acme/other/lint"], [duplicate])).catch((err: unknown) => err);
+    expect(error).toMatchObject({ code: "EEXIST", syscall: "symlink" });
+    expect(await fs.readdir(tmp)).toEqual([]);
+  });
+});
