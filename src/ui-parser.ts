@@ -1,19 +1,129 @@
-// Owner: WP6. Contract: INTERFACES.md §12. Self-contained: zero imports, no side effects, never throws.
-// WP0 stub: passes every non-empty line through as raw stdout.
+// Owner: WP6. Contract: INTERFACES.md §12 and Paperclip adapter-ui-parser.md 1.0.0.
+// Self-contained: zero imports, no module-level side effects, never throws.
 
-type StubTranscriptEntry = { kind: "stdout"; ts: string; text: string };
+type UiTranscriptEntry =
+  | { kind: "assistant" | "thinking" | "user" | "stderr" | "system" | "stdout"; ts: string; text: string }
+  | { kind: "tool_call"; ts: string; name: string; input: unknown; toolUseId: string }
+  | { kind: "tool_result"; ts: string; toolUseId: string; toolName: string; content: string; isError: boolean }
+  | { kind: "init"; ts: string; model: string; sessionId: string }
+  | { kind: "result"; ts: string; text: string; inputTokens: number; outputTokens: number; cachedTokens: number;
+      costUsd: number; subtype: string; isError: boolean; errors: string[] };
 
-export function parseStdoutLine(line: string, ts: string): StubTranscriptEntry[] {
-  const text = typeof line === "string" ? line.trim() : "";
-  return text ? [{ kind: "stdout", ts, text }] : [];
+type ParserState = { model: string };
+
+const DEFAULT_PROVIDER_ERROR = "Prime provider request failed.";
+/** Text, tool calls and tool results come from message_end only (INTERFACES §12, §16 A5); these would duplicate them. */
+const IGNORED_EVENT_TYPES = ["agent_start", "turn_start", "turn_end", "message_start", "message_update", "tool_execution_start",
+  "tool_execution_update", "tool_execution_end"];
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
 }
 
-export function createStdoutParser(): {
-  parseLine(line: string, ts: string): StubTranscriptEntry[];
-  reset(): void;
-} {
+function asString(value: unknown, fallback = ""): string {
+  return typeof value === "string" ? value : fallback;
+}
+
+function asNumber(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function contentItems(content: unknown): Record<string, unknown>[] {
+  if (!Array.isArray(content)) return [];
+  return content.map(asRecord).filter((item): item is Record<string, unknown> => item !== null);
+}
+
+/** Joins `item[field]` of the content items whose `type` equals `type`; a string content counts as text. */
+function joinItems(content: unknown, type: string, field: string): string {
+  if (typeof content === "string") return type === "text" ? content : "";
+  return contentItems(content).filter((item) => item.type === type).map((item) => asString(item[field])).join("");
+}
+
+function errorText(message: Record<string, unknown>): string {
+  return asString(message.errorMessage).trim() || DEFAULT_PROVIDER_ERROR;
+}
+
+function assistantEntries(state: ParserState, message: Record<string, unknown>, ts: string): UiTranscriptEntry[] {
+  const model = asString(message.model);
+  if (model) state.model = model;
+  const entries: UiTranscriptEntry[] = [];
+  const thinking = joinItems(message.content, "thinking", "thinking");
+  if (thinking) entries.push({ kind: "thinking", ts, text: thinking });
+  const text = joinItems(message.content, "text", "text");
+  if (text) entries.push({ kind: "assistant", ts, text });
+  for (const item of contentItems(message.content)) {
+    if (item.type !== "toolCall") continue;
+    entries.push({ kind: "tool_call", ts, name: asString(item.name, "tool"), input: item.arguments ?? {}, toolUseId: asString(item.id) });
+  }
+  if (message.stopReason === "error") entries.push({ kind: "stderr", ts, text: errorText(message) });
+  return entries;
+}
+
+/** Tool result from the toolResult-role message (INTERFACES §16 A5): text items, else the content as JSON. */
+function toolResultEntry(message: Record<string, unknown>, ts: string): UiTranscriptEntry {
+  const text = joinItems(message.content, "text", "text");
+  return { kind: "tool_result", ts, toolUseId: asString(message.toolCallId), toolName: asString(message.toolName, "tool"),
+    content: text || JSON.stringify(message.content ?? null), isError: message.isError === true };
+}
+
+/** Token usage of this run's assistant messages, counted once (L14); costUsd 0: Prime's cost is an estimate (§16 A3). */
+function resultEntry(event: Record<string, unknown>, ts: string): UiTranscriptEntry {
+  let [inputTokens, outputTokens, cachedTokens] = [0, 0, 0];
+  const errors: string[] = [];
+  for (const message of contentItems(event.messages)) {
+    if (message.role !== "assistant") continue;
+    const usage = asRecord(message.usage);
+    inputTokens += asNumber(usage?.input);
+    outputTokens += asNumber(usage?.output);
+    cachedTokens += asNumber(usage?.cacheRead);
+    if (message.stopReason === "error" && !errors.includes(errorText(message))) errors.push(errorText(message));
+  }
+  const isError = errors.length > 0;
+  const text = isError ? "Run failed" : "Run completed";
+  return { kind: "result", ts, text, inputTokens, outputTokens, cachedTokens, costUsd: 0, subtype: "end", isError, errors };
+}
+
+function parseEvent(state: ParserState, event: Record<string, unknown>, raw: string, ts: string): UiTranscriptEntry[] {
+  const type = asString(event.type);
+  if (type === "session") return [{ kind: "init", ts, model: state.model, sessionId: asString(event.id) }];
+  if (type === "message_end") {
+    const message = asRecord(event.message);
+    if (message?.role === "assistant") return assistantEntries(state, message, ts);
+    if (message?.role === "toolResult") return [toolResultEntry(message, ts)];
+    if (message?.role === "user") {
+      const text = joinItems(message.content, "text", "text");
+      return text ? [{ kind: "user", ts, text }] : [];
+    }
+    return [];
+  }
+  if (type === "agent_end") return [resultEntry(event, ts)];
+  if (IGNORED_EVENT_TYPES.includes(type)) return [];
+  return [{ kind: "stdout", ts, text: raw }]; // unknown event type
+}
+
+function parseWithState(state: ParserState, line: string, ts: string): UiTranscriptEntry[] {
+  const raw = typeof line === "string" ? line.trim() : "";
+  if (!raw) return [];
+  if (raw.startsWith("[paperclip]")) return [{ kind: "system", ts, text: raw }];
+  try {
+    const event = asRecord(JSON.parse(raw));
+    return event ? parseEvent(state, event, raw, ts) : [{ kind: "stdout", ts, text: raw }];
+  } catch {
+    return [{ kind: "stdout", ts, text: raw }];
+  }
+}
+
+export function parseStdoutLine(line: string, ts: string): UiTranscriptEntry[] {
+  return parseWithState({ model: "" }, line, ts);
+}
+
+export function createStdoutParser(): { parseLine(line: string, ts: string): UiTranscriptEntry[]; reset(): void } {
+  const state: ParserState = { model: "" };
   return {
-    parseLine: parseStdoutLine,
-    reset() {},
+    parseLine: (line: string, ts: string) => parseWithState(state, line, ts),
+    reset: () => {
+      state.model = "";
+    },
   };
 }
