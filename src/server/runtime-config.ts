@@ -57,8 +57,16 @@ function parseThinking(value: unknown): PrimeThinkingLevel | null {
 }
 
 function parseCredential(config: Record<string, unknown>, provider: string): PrimeCredentialConfig {
-  if (config.credentialMode === "api_key") {
-    return { mode: "api_key", provider, apiKeyEnvVar: trimmedText(config.apiKeyEnvVar) ?? "" };
+  const mode = isUnset(config.credentialMode) ? "host_auth" : config.credentialMode;
+  if (mode === "api_key") {
+    const apiKeyEnvVar = trimmedText(config.apiKeyEnvVar);
+    if (apiKeyEnvVar === null) {
+      throw new PrimeConfigError("prime_api_key_env_var_required", "adapterConfig.apiKeyEnvVar is required when credentialMode is api_key.");
+    }
+    return { mode: "api_key", provider, apiKeyEnvVar };
+  }
+  if (mode !== "host_auth") {
+    throw new PrimeConfigError("prime_credential_mode_invalid", "adapterConfig.credentialMode must be host_auth or api_key.");
   }
   const hostAuthFile = absolutePath(config.hostAuthFile, "hostAuthFile");
   return { mode: "host_auth", hostAuthFile: hostAuthFile ?? path.join(os.homedir(), ".prime", "agent", "auth.json") };

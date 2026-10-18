@@ -82,3 +82,15 @@ describe("resolvePrimeRuntimeConfig thinking (INTERFACES §2, §16 A6)", () => {
     expect(configErrorCode({ model: "a/b", thinkingEffort: "turbo" })).toBe("prime_thinking_invalid");
   });
 });
+
+describe("resolvePrimeRuntimeConfig credential (INTERFACES §2)", () => {
+  it.each([["oauth"], ["API_KEY"], [7]])("refuses credentialMode %j", (credentialMode) => {
+    expect(configErrorCode({ model: "a/b", credentialMode })).toBe("prime_credential_mode_invalid");
+  });
+  it("requires apiKeyEnvVar in api_key mode", () => {
+    expect(configErrorCode({ model: "a/b", credentialMode: "api_key", apiKeyEnvVar: " " })).toBe("prime_api_key_env_var_required");
+  });
+  it("treats a blank credentialMode as host_auth", () => {
+    expect(resolvePrimeRuntimeConfig({ model: "a/b", credentialMode: "" }, AGENT, INSTANCE_ROOT).credential.mode).toBe("host_auth");
+  });
+});
