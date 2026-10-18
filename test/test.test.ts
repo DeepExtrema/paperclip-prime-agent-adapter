@@ -319,3 +319,29 @@ describe("testEnvironment: model list (INTERFACES.md §8, §10)", () => {
     expect(mocks.listPrimeModels).not.toHaveBeenCalled();
   });
 });
+
+describe("testEnvironment: configured model (INTERFACES.md §8, §10, §16 A9)", () => {
+  it("passes with every check in order when the configured model is listed", async () => {
+    const result = await testEnvironment(ctx());
+    expect(result.status).toBe("pass");
+    expect(codes(result)).toEqual([
+      "prime_cwd_valid", "prime_cli_found", "prime_cli_version", "prime_auth_host_linked", "prime_models_discovered", "prime_model_listed",
+    ]);
+    const models = [expect.objectContaining({ id: MODEL_REF }), expect.objectContaining({ id: "anthropic/claude-opus-5-5" })];
+    expect(mocks.assertPrimeModelListed).toHaveBeenCalledWith(MODEL_REF, models);
+    const message = "anthropic/claude-haiku-4-5 is listed; entitlement is proven only by a run.";
+    expect(check(result, "prime_model_listed")).toEqual({ code: "prime_model_listed", level: "info", message });
+    expect(cleanups).toHaveLength(1);
+    expect(cleanups[0]).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports the assertPrimeModelListed error as prime_model_unknown", async () => {
+    const message = "anthropic/claude-haiku-4-5 is not listed. Listed: anthropic/m-01";
+    mocks.assertPrimeModelListed.mockImplementation(() => {
+      throw new PrimeCliError("prime_model_unknown", message);
+    });
+    const result = await testEnvironment(ctx());
+    expect(result.status).toBe("fail");
+    expect(check(result, "prime_model_unknown")).toEqual({ code: "prime_model_unknown", level: "error", message });
+  });
+});

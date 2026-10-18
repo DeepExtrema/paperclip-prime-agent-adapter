@@ -45,8 +45,6 @@ function credentialCheckCode(err: unknown): PrimeCheckCode {
   return missing ? "prime_auth_missing" : "prime_auth_unsafe";
 }
 
-// [wp5:helpers]
-
 export async function testEnvironment(ctx: AdapterEnvironmentTestContext): Promise<AdapterEnvironmentTestResult> {
   const checks: PrimeCheck[] = [];
   const finish = (): AdapterEnvironmentTestResult => ({
@@ -150,7 +148,12 @@ export async function testEnvironment(ctx: AdapterEnvironmentTestContext): Promi
     }
     checks.push({ code: "prime_models_discovered", level: "info", message: `Prime listed ${models.length} model(s) for the configured credential.` });
 
-    // [wp5:next-step]
+    try {
+      assertPrimeModelListed(runtime.modelRef, models);
+      checks.push({ code: "prime_model_listed", level: "info", message: `${runtime.modelRef} is listed; entitlement is proven only by a run.` });
+    } catch (err) {
+      checks.push({ code: "prime_model_unknown", level: "error", message: errorMessage(err) });
+    }
     return finish();
   } finally {
     await ephemeral.cleanup();
