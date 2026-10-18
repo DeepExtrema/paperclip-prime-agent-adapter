@@ -16,3 +16,8 @@ export const createEphemeralPrimeAgentDir: CreateEphemeralPrimeAgentDir = async 
   notImplemented("WP1", "createEphemeralPrimeAgentDir");
 
 export const buildPrimeChildEnv: BuildPrimeChildEnv = () => notImplemented("WP1", "buildPrimeChildEnv");
+
+/** INTERFACES §16 A15/A16 (stub until WP1). Rejects with PrimeConfigError("prime_path_invalid") for a protected cwd. */
+export async function assertPrimeCwdAllowed(_cwd: string): Promise<void> {
+  return notImplemented("WP1", "assertPrimeCwdAllowed");
+}
