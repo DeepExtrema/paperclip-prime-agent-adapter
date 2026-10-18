@@ -188,3 +188,27 @@ describe("parsePrimeJsonl: finalMessage", () => {
     expect(parsePrimeJsonl(stdout).finalMessage).toBe("earlier");
   });
 });
+
+describe("parsePrimeJsonl: provider failures", () => {
+  it.each(RUNS)("%s: errors hold each provider failure once", (run) => {
+    const expected = run === "run1" ? ["No AWS credentials available for Bedrock"] : [];
+    expect(parsePrimeJsonl(fixture(run)).errors).toEqual(expected);
+  });
+  it("uses the fallback text when errorMessage is missing", () => {
+    const stdout = jsonl({ type: "message_end", message: { role: "assistant", stopReason: "error" } });
+    expect(parsePrimeJsonl(stdout).errors).toEqual(["Prime provider request failed."]);
+  });
+  it("reads failures from agent_end messages and ignores non-assistant roles", () => {
+    const stdout = jsonl(
+      { type: "message_end", message: { role: "user", stopReason: "error", errorMessage: "not mine" } },
+      {
+        type: "agent_end",
+        messages: [
+          { role: "assistant", stopReason: "error", errorMessage: "first" },
+          { role: "assistant", stopReason: "error", errorMessage: "second" },
+        ],
+      },
+    );
+    expect(parsePrimeJsonl(stdout).errors).toEqual(["first", "second"]);
+  });
+});

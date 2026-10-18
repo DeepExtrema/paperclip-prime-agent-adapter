@@ -4,6 +4,8 @@ import type { IsPrimeUnknownSessionError, ParsedPrimeOutput, ParsePrimeJsonl } f
 
 type JsonObject = Record<string, unknown>;
 
+const PROVIDER_FAILURE_FALLBACK = "Prime provider request failed.";
+
 function asObject(value: unknown): JsonObject | null {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as JsonObject) : null;
 }
@@ -63,6 +65,17 @@ function lastAssistantText(messages: unknown): string | null {
   return null;
 }
 
+function addError(result: ParsedPrimeOutput, message: string): void {
+  if (!result.errors.includes(message)) result.errors.push(message);
+}
+
+/** Records an assistant message that ended with stopReason "error" (pi-local parse.ts:57-69). */
+function recordProviderFailure(result: ParsedPrimeOutput, value: unknown): void {
+  const message = assistantMessage(value);
+  if (message?.stopReason !== "error") return;
+  addError(result, asText(message.errorMessage).trim() || PROVIDER_FAILURE_FALLBACK);
+}
+
 /** One stdout line as a JSON object, or null for blank, malformed and non-object lines. */
 function parseEventLine(line: string): JsonObject | null {
   const trimmed = line.trim();
@@ -103,7 +116,11 @@ export const parsePrimeJsonl: ParsePrimeJsonl = (stdout) => {
           result.sessionCwd = asText(event.cwd) || null;
         }
         break;
+      case "message_end":
+        recordProviderFailure(result, event.message);
+        break;
       case "turn_end": {
+        recordProviderFailure(result, event.message);
         const message = assistantMessage(event.message);
         if (!message) break;
         addUsage(result, message.usage);
@@ -116,6 +133,9 @@ export const parsePrimeJsonl: ParsePrimeJsonl = (stdout) => {
       }
       case "agent_end":
         result.sawAgentEnd = true;
+        if (Array.isArray(event.messages)) {
+          for (const message of event.messages) recordProviderFailure(result, message);
+        }
         agentEndText = lastAssistantText(event.messages);
         break;
       default:
