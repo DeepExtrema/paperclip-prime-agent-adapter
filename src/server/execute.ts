@@ -156,7 +156,7 @@ function mapResult(attempt: Attempt, prep: PreparedRun, clearSession: boolean): 
     provider: runtime.provider, model: runtime.modelRef, biller: runtime.provider, billingType: seeded.billingType,
     ...(usage ? { usage: { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, cachedInputTokens: usage.cachedInputTokens } } : {}),
     usageBasis: "per_run",
-    costUsd: null,
+    costUsd: seeded.billingType === "api" && usage !== null && usage.reportedCostUsd > 0 ? usage.reportedCostUsd : null,
     resultJson: { stdout: proc.stdout, stderr: proc.stderr, cacheWriteTokens: usage?.cacheWriteTokens ?? null, totalTokens: usage?.totalTokens ?? null },
     clearSession,
   };

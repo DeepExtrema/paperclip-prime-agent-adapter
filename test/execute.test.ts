@@ -204,3 +204,21 @@ describe("execute: timeout (INTERFACES §11.1, §11.7, L9)", () => {
     expect([result.timedOut, Date.now() - started < 3000]).toEqual([true, true]);
   }, 15_000);
 });
+describe("execute: cost (MASTER-PLAN decisions, INTERFACES §11.7, §16 A3)", () => {
+  const priced = (total: string) => {
+    const file = path.join(root, "run2-priced.jsonl");
+    writeFileSync(file, readFileSync(RUN2, "utf8").replaceAll('"total":0.0', `"total":${total}`));
+    return file;
+  };
+  it("reports Prime's cost for API-key billing", async () => {
+    const { result } = await run({
+      config: { credentialMode: "api_key", apiKeyEnvVar: "ANTHROPIC_API_KEY" },
+      env: { ANTHROPIC_API_KEY: "sk-test-not-real", FAKE_PRIME_STDOUT_FILE: priced("0.0125") },
+    });
+    expect(result).toMatchObject({ billingType: "api", costUsd: 0.0125 });
+  });
+  it("reports no cost for a subscription run even when Prime estimates one", async () => {
+    const { result } = await run({ env: { FAKE_PRIME_STDOUT_FILE: priced("0.0132") } });
+    expect(result).toMatchObject({ billingType: "subscription", costUsd: null });
+  });
+});
