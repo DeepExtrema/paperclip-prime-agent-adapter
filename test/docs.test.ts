@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const read = (rel: string) => readFileSync(path.join(repoRoot, rel), "utf8");
 
-const DOCS = ["README.md"];
+const DOCS = ["README.md", "docs/install.md"];
 const CLAIM_LEVELS = ["registered/loaded", "deterministic-qualified", "live-qualified", "not qualified"];
 const PRIVATE_PATTERNS: Array<[string, RegExp]> = [
   ["absolute home path", /\/home\/[^\s/`'")]+/],
