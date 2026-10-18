@@ -62,3 +62,37 @@ describe("createEphemeralPrimeAgentDir (INTERFACES §3)", () => {
     await expect(cleanup()).resolves.toBeUndefined();
   });
 });
+
+describe("seedPrimeAgentDir host_auth link (INTERFACES §3 steps 1-2)", () => {
+  it("creates the agent dir and sessions/ with mode 0700, re-asserting it on an existing dir", async () => {
+    const plan = agentPlan();
+    await fs.mkdir(plan.agentDir, { recursive: true, mode: 0o755 });
+    await fs.chmod(plan.agentDir, 0o755);
+    await seedPrimeAgentDir(plan, { provider: "anthropic", env: {} });
+    expect([await modeOf(plan.agentDir), await modeOf(plan.sessionDir)]).toEqual([0o700, 0o700]);
+  });
+  it.each([["no file"], ["a regular file"], ["a link to another file"], ["a dangling link"]])(
+    "makes auth.json an absolute symlink to the host file when it was %s",
+    async (previous) => {
+      const plan = agentPlan();
+      const authFile = path.join(plan.agentDir, "auth.json");
+      await fs.mkdir(plan.agentDir, { recursive: true });
+      await fs.writeFile(path.join(root, "other.json"), "{}");
+      if (previous === "a regular file") await fs.writeFile(authFile, "{\"stale\":true}");
+      if (previous === "a link to another file") await fs.symlink(path.join(root, "other.json"), authFile);
+      if (previous === "a dangling link") await fs.symlink(path.join(root, "missing.json"), authFile);
+      const seeded = await seedPrimeAgentDir(plan, { provider: "anthropic", env: {} });
+      expect([seeded.auth, seeded.plan]).toEqual(["host_auth_symlink", plan]);
+      expect([(await fs.lstat(authFile)).isSymbolicLink(), await fs.readlink(authFile)]).toEqual([true, hostAuthFile]);
+      expect((await fs.readdir(plan.agentDir)).sort()).toEqual(["auth.json", "sessions"]);
+      expect(seeded.notes).toEqual([`Prime agent dir: ${plan.agentDir} (agent).`, `auth.json -> ${hostAuthFile} (host Prime credential).`]);
+    },
+  );
+  it("seeds an ephemeral dir the same way", async () => {
+    const { plan, cleanup } = await createEphemeralPrimeAgentDir({ mode: "host_auth", hostAuthFile });
+    const seeded = await seedPrimeAgentDir(plan, { provider: "", env: {} });
+    expect(await fs.readlink(path.join(plan.agentDir, "auth.json"))).toBe(hostAuthFile);
+    expect(seeded.notes[0]).toBe(`Prime agent dir: ${plan.agentDir} (ephemeral).`);
+    await cleanup();
+  });
+});

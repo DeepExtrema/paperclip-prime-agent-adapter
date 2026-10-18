@@ -109,7 +109,43 @@ export const resolvePrimeRuntimeConfig: ResolvePrimeRuntimeConfig = (config, age
 };
 
 // §3 agent dir
-export const seedPrimeAgentDir: SeedPrimeAgentDir = async () => notImplemented("WP1", "seedPrimeAgentDir");
+async function ensurePrivateDir(dir: string): Promise<void> {
+  await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+  await fs.chmod(dir, 0o700);
+}
+
+/** Creates the new auth.json under a temp name in the same dir, then renames it over auth.json (atomic). */
+async function replaceAuthFile(authFile: string, create: (temp: string) => Promise<void>): Promise<void> {
+  const temp = path.join(path.dirname(authFile), `.auth.json.${process.pid}.${randomUUID()}.tmp`);
+  try {
+    await create(temp);
+    await fs.rename(temp, authFile);
+  } catch (err) {
+    await fs.rm(temp, { force: true }).catch(() => undefined);
+    throw err;
+  }
+}
+
+/** codex-local ensureSymlink pattern (codex-home.ts:220-249): a copy goes stale because refresh tokens are single-use. */
+async function linkHostAuth(authFile: string, hostAuthFile: string): Promise<void> {
+  const current = await fs.readlink(authFile).catch(() => null);
+  if (current === hostAuthFile) return;
+  await replaceAuthFile(authFile, (temp) => fs.symlink(hostAuthFile, temp));
+}
+
+export const seedPrimeAgentDir: SeedPrimeAgentDir = async (plan, input) => {
+  await ensurePrivateDir(plan.agentDir);
+  await ensurePrivateDir(plan.sessionDir);
+  const authFile = path.join(plan.agentDir, "auth.json");
+  const notes = [`Prime agent dir: ${plan.agentDir} (${plan.kind}).`];
+  const credential = plan.credential;
+  if (credential.mode === "host_auth") {
+    await linkHostAuth(authFile, credential.hostAuthFile);
+    notes.push(`auth.json -> ${credential.hostAuthFile} (host Prime credential).`);
+    return { plan, auth: "host_auth_symlink", billingType: "unknown", notes };
+  }
+  return notImplemented("WP1", "seedPrimeAgentDir api_key");
+};
 
 export const createEphemeralPrimeAgentDir: CreateEphemeralPrimeAgentDir = async (credential) => {
   const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-prime-agent-"));
