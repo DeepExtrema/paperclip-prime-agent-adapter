@@ -1,0 +1,3 @@
+No models available. Use /login to log into a provider via OAuth or API key. See:
+  /home/user/.local/share/prime-agent/releases/0.10.0-linux-x64-c16bd2af5e77b53f49b914a44742c4cf6a67c5ed5000041430b78dbd4c3bcbec/docs/providers.md
+  /home/user/.local/share/prime-agent/releases/0.10.0-linux-x64-c16bd2af5e77b53f49b914a44742c4cf6a67c5ed5000041430b78dbd4c3bcbec/docs/models.md

@@ -1,0 +1,17 @@
+provider   model                       context  max-out  thinking  images
+anthropic  claude-fable-5              1M       128K     yes       yes   
+anthropic  claude-fable-5-1            1M       128K     yes       yes   
+anthropic  claude-haiku-4-5            200K     64K      yes       yes   
+anthropic  claude-haiku-4-5-20251001   200K     64K      yes       yes   
+anthropic  claude-opus-4-5             200K     64K      yes       yes   
+anthropic  claude-opus-4-5-20251101    200K     64K      yes       yes   
+anthropic  claude-opus-4-6             1M       128K     yes       yes   
+anthropic  claude-opus-4-7             1M       128K     yes       yes   
+anthropic  claude-opus-4-8             1M       128K     yes       yes   
+anthropic  claude-opus-5               1M       128K     yes       yes   
+anthropic  claude-opus-5-5             1M       128K     yes       yes   
+anthropic  claude-sonnet-4-5           1M       64K      yes       yes   
+anthropic  claude-sonnet-4-5-20250929  1M       64K      yes       yes   
+anthropic  claude-sonnet-4-6           1M       128K     yes       yes   
+anthropic  claude-sonnet-5             1M       128K     yes       yes   
+anthropic  claude-sonnet-5-5           1M       128K     yes       yes   

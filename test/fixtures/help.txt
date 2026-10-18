@@ -1,0 +1,84 @@
+prime-agent - AI coding assistant with a Python REPL tool
+
+Usage:
+  prime-agent [options] [@files...] [message...]
+  prime-agent <command> [args...]
+
+Options:
+Run options:
+  -p, --print                        Print a response and exit
+  --mode <text|json|rpc|acp|daemon>  Select the output mode (default: text)
+  --cwd <dir>                        Use a specific working directory
+  --offline                          Disable startup network operations
+  --verbose                          Force verbose startup
+  --daemon-socket <path>             Use a specific daemon socket
+
+Model options:
+  --provider <name>    Select a model provider
+  --model <id>         Select a model
+  --api-key <key>      Use an API key for this run
+  --models <patterns>  Set comma-separated models for cycling
+  --thinking <level>   Set reasoning: off, minimal, low, medium, high, xhigh, max
+
+Session options:
+  -c, --continue           Continue the previous session
+  -r, --resume [path|id]   Open the agents view, or resume a saved session
+  --fork <path|id>         Fork a saved session into a new session
+  --session-dir <dir>      Use a custom session directory
+  --no-session             Do not save the session
+  --goal <objective>       Seed a persistent goal for a new root session
+  --goal-token-budget <n>  Set a positive token budget for --goal
+
+Resource options:
+  --skill <path>              Load a skill (repeatable)
+  -ns, --no-skills            Disable skill discovery
+  --prompt-template <path>    Load a prompt template (repeatable)
+  -np, --no-prompt-templates  Disable prompt template discovery
+  --theme <path>              Load a theme (repeatable)
+  --no-themes                 Disable theme discovery
+  -nc, --no-context-files     Disable AGENTS.md and CLAUDE.md discovery
+
+Prompt options:
+  --system-prompt <text>         Replace the default system prompt
+  --append-system-prompt <text>  Append to the system prompt (repeatable)
+  --                             Treat all following arguments as messages
+
+Autonomous options:
+  --autonomous                        Continue until gates pass or a limit is reached
+  --autonomous-gate <command>         Run a completion gate (repeatable)
+  --autonomous-gate-retries <n>       Set positive retries per failed gate (default: 3)
+  --autonomous-gate-timeout-ms <n>    Set positive per-gate timeout in ms (default: 300000)
+  --autonomous-max-continuations <n>  Set positive follow-up limit (default: 3)
+  --autonomous-max-turns <n>          Set positive assistant-turn limit (default: 12)
+  --autonomous-max-tokens <n>         Set positive token limit (default: 80000)
+  --autonomous-timeout-ms <n>         Set positive wall-clock limit in ms (default: 1800000)
+
+Help:
+  -v, --version  Show version and exit
+  -h, --help     Show this help
+
+Commands:
+  help       Show command help
+  agents     Search and open sessions
+  list       List agents
+  sessions   Show agent status, activity, and usage
+  attach     Attach the interactive UI to an agent
+  stop       Stop an agent
+  rename     Rename an agent
+  send       Send a message to an agent
+  schedule   Manage prompts that run later or on a recurring schedule
+  status     Show background service status
+  telemetry  Show or change usage telemetry
+  doctor     Inspect and safely clean up background services
+  incident   Reconstruct a daemon incident from its logs
+  shutdown   Stop every agent and background service
+  mcp        Manage user MCP servers
+  package    Manage capability packages
+  update     Update to the latest Rust build (uninstalls the TypeScript version)
+  model      Inspect available models
+  session    Manage saved sessions
+  config     Configure package resources
+  factory    Share and run factory machines from the machine library
+  prompt     Print the assembled system prompt with its layer breakdown
+
+Run "prime-agent help <command>" for command details.
