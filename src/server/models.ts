@@ -1,9 +1,31 @@
-// Owner: WP4. Contract: INTERFACES.md §8. Replace the stub bodies; keep the typed exports.
+// Owner: WP4. Contract: INTERFACES.md §8.
+import { createHash } from "node:crypto";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import type { AdapterModel } from "@paperclipai/adapter-utils";
-import { notImplemented } from "../errors.js";
-import type { DetectPrimeModel, ListPrimeModels, ParsePrimeModelList } from "../types.js";
+import { runChildProcess, type RunProcessResult } from "@paperclipai/adapter-utils/server-utils";
+import { notImplemented, PrimeCliError } from "../errors.js";
+import {
+  PRIME_DEFAULT_COMMAND,
+  type DetectPrimeModel,
+  type EphemeralPrimeAgentDir,
+  type ListPrimeModels,
+  type ParsePrimeModelList,
+  type PrimeModelRow,
+} from "../types.js";
+import { buildPrimeChildEnv, createEphemeralPrimeAgentDir, seedPrimeAgentDir } from "./runtime-config.js";
 
-export const parsePrimeModelList: ParsePrimeModelList = () => notImplemented("WP4", "parsePrimeModelList");
+export const parsePrimeModelList: ParsePrimeModelList = (stdout) => {
+  const rows: PrimeModelRow[] = [];
+  for (const line of stdout.split(/\r?\n/)) {
+    const cols = line.trimEnd().split(/\s{2,}/);
+    if (cols.length !== 6 || (cols[0] === "provider" && cols[1] === "model")) continue;
+    const [provider, model, context, maxOut, thinking, images] = cols as [string, string, string, string, string, string];
+    rows.push({ provider, model, id: `${provider}/${model}`, context, maxOut, thinking: thinking === "yes", images: images === "yes" });
+  }
+  return rows;
+};
 
 /** Cached (60 s) `prime-agent model list` in the given agent dir. Throws PrimeCliError. */
 export const listPrimeModels: ListPrimeModels = async () => notImplemented("WP4", "listPrimeModels");
