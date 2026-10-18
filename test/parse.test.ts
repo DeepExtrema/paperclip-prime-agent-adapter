@@ -73,3 +73,14 @@ describe("parsePrimeJsonl: session", () => {
     expect(parsed.sessionCwd).toBeNull();
   });
 });
+
+describe("parsePrimeJsonl: sawAgentEnd", () => {
+  it.each(RUNS)("%s: sawAgentEnd is true", (run) => {
+    expect(parsePrimeJsonl(fixture(run)).sawAgentEnd).toBe(true);
+  });
+  it("run4 without its agent_end line: sawAgentEnd is false", () => {
+    const lines = fixture("run4").trimEnd().split("\n");
+    expect(lines.at(-1)).toContain('"type":"agent_end"');
+    expect(parsePrimeJsonl(lines.slice(0, -1).join("\n")).sawAgentEnd).toBe(false);
+  });
+});

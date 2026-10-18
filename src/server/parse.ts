@@ -51,6 +51,9 @@ export const parsePrimeJsonl: ParsePrimeJsonl = (stdout) => {
           result.sessionCwd = asText(event.cwd) || null;
         }
         break;
+      case "agent_end":
+        result.sawAgentEnd = true;
+        break;
       default:
         break;
     }
