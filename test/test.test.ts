@@ -278,3 +278,44 @@ describe("testEnvironment: credential (INTERFACES.md §3, §10)", () => {
     expect(codes(result)).toEqual(["prime_cwd_valid", "prime_cli_missing", "prime_auth_host_linked"]);
   });
 });
+
+describe("testEnvironment: model list (INTERFACES.md §8, §10)", () => {
+  it("lists models in the seeded ephemeral dir", async () => {
+    const result = await testEnvironment(ctx());
+    const env = expect.objectContaining({ PRIME_AGENT_CODING_AGENT_DIR: ephemeralDirs[0] });
+    expect(mocks.listPrimeModels).toHaveBeenCalledWith({ command: path.join(root, "bin", "prime-agent"), env, cwd: workDir });
+    const message = "Prime listed 2 model(s) for the configured credential.";
+    expect(check(result, "prime_models_discovered")).toEqual({ code: "prime_models_discovered", level: "info", message });
+  });
+
+  it("warns when the list is empty and skips the configured-model check", async () => {
+    mocks.listPrimeModels.mockResolvedValue([]);
+    const result = await testEnvironment(ctx());
+    expect(result.status).toBe("warn");
+    expect(check(result, "prime_models_empty")).toEqual({
+      code: "prime_models_empty",
+      level: "warn",
+      message: "Prime listed no models for the configured credential.",
+      hint: "Run `prime-agent model list` with this credential and check the provider login.",
+    });
+    expect(codes(result).filter((code) => code.startsWith("prime_model_"))).toEqual([]);
+  });
+
+  it("warns when listing fails and still cleans up", async () => {
+    mocks.listPrimeModels.mockRejectedValue(new PrimeCliError("prime_model_list_failed", "model list exited 1: boom"));
+    const result = await testEnvironment(ctx());
+    expect(result.status).toBe("warn");
+    const failed = { code: "prime_models_discovery_failed", level: "warn", message: "model list exited 1: boom" };
+    expect(check(result, "prime_models_discovery_failed")).toEqual(failed);
+    expect(cleanups[0]).toHaveBeenCalledTimes(1);
+  });
+
+  it("skips the model steps when the version is unsupported or the credential failed", async () => {
+    await writeFakePrime("0.11.0");
+    await testEnvironment(ctx());
+    await writeFakePrime("0.10.0");
+    mocks.seedPrimeAgentDir.mockRejectedValue(new PrimeCredentialError("prime_host_auth_missing", "no host auth"));
+    await testEnvironment(ctx());
+    expect(mocks.listPrimeModels).not.toHaveBeenCalled();
+  });
+});

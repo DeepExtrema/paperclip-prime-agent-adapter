@@ -134,6 +134,22 @@ export async function testEnvironment(ctx: AdapterEnvironmentTestContext): Promi
       checks.push({ code: credentialCheckCode(err), level: "error", message: errorMessage(err) });
     }
 
+    if (!cliFound || !versionSupported || !credentialReady) return finish();
+
+    let models: AdapterModel[];
+    try {
+      models = await listPrimeModels({ command, env, cwd });
+    } catch (err) {
+      checks.push({ code: "prime_models_discovery_failed", level: "warn", message: errorMessage(err) });
+      return finish();
+    }
+    if (models.length === 0) {
+      const hint = "Run `prime-agent model list` with this credential and check the provider login.";
+      checks.push({ code: "prime_models_empty", level: "warn", message: "Prime listed no models for the configured credential.", hint });
+      return finish();
+    }
+    checks.push({ code: "prime_models_discovered", level: "info", message: `Prime listed ${models.length} model(s) for the configured credential.` });
+
     // [wp5:next-step]
     return finish();
   } finally {
