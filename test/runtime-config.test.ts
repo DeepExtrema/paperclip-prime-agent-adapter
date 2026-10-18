@@ -94,3 +94,16 @@ describe("resolvePrimeRuntimeConfig credential (INTERFACES §2)", () => {
     expect(resolvePrimeRuntimeConfig({ model: "a/b", credentialMode: "" }, AGENT, INSTANCE_ROOT).credential.mode).toBe("host_auth");
   });
 });
+
+describe("resolvePrimeRuntimeConfig paths (INTERFACES §2)", () => {
+  it.each([
+    ["relative cwd", { model: "a/b", cwd: "relative/dir" }, AGENT, INSTANCE_ROOT],
+    ["relative hostAuthFile", { model: "a/b", hostAuthFile: "auth.json" }, AGENT, INSTANCE_ROOT],
+    ["relative agentDirRoot", { model: "a/b", agentDirRoot: "agents" }, AGENT, INSTANCE_ROOT],
+    ["agent id with ..", { model: "a/b" }, { id: "../escape", companyId: "company-1" }, INSTANCE_ROOT],
+    ["company id with /", { model: "a/b" }, { id: "agent-1", companyId: "a/b" }, INSTANCE_ROOT],
+    ["relative instance root", { model: "a/b" }, AGENT, "instances/default"],
+  ])("refuses %s", (_name, config, agent, instanceRoot) => {
+    expect(configErrorCode(config, agent, instanceRoot)).toBe("prime_path_invalid");
+  });
+});

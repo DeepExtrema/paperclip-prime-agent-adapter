@@ -32,6 +32,9 @@ const nonNegative = (value: unknown, fallback: number): number => {
 function absolutePath(value: unknown, key: string): string | null {
   const text = trimmedText(value);
   if (text === null) return null;
+  if (!path.isAbsolute(text)) {
+    throw new PrimeConfigError("prime_path_invalid", `adapterConfig.${key} must be an absolute path.`);
+  }
   return path.resolve(text);
 }
 
@@ -77,6 +80,12 @@ export const resolvePrimeRuntimeConfig: ResolvePrimeRuntimeConfig = (config, age
   const thinking = parseThinking(isUnset(config.thinking) ? config.thinkingEffort : config.thinking); // §16 A6
   const credential = parseCredential(config, provider);
   const cwd = absolutePath(config.cwd, "cwd");
+  if (!SAFE_PATH_SEGMENT.test(agent.id) || !SAFE_PATH_SEGMENT.test(agent.companyId)) {
+    throw new PrimeConfigError("prime_path_invalid", "Agent and company ids must match [A-Za-z0-9_-]+.");
+  }
+  if (!path.isAbsolute(instanceRoot)) {
+    throw new PrimeConfigError("prime_path_invalid", `Paperclip instance root must be absolute: ${instanceRoot}`);
+  }
   const agentDirRoot =
     absolutePath(config.agentDirRoot, "agentDirRoot") ?? path.join(instanceRoot, "companies", agent.companyId, "agents");
   const agentDir = path.join(agentDirRoot, agent.id, "prime-agent-home");
