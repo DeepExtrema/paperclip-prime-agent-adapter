@@ -47,7 +47,7 @@ First run the environment test: `POST /api/companies/{companyId}/adapters/prime_
 
 **Empty model list in the UI:** the list uses `~/.prime/agent/auth.json` of the Paperclip server user. Agents with `api_key` are checked by the environment test and at run time, not here. `listModels()` runs without agent context, so it resolves the default `prime-agent` on the server's PATH and ignores the agent's `command`. The attempt-1 smoke failed because that PATH omitted `~/.local/bin`; the adapter now falls back to `~/.local/bin/prime-agent`.
 
-If the model list is empty, the Paperclip server's PATH does not contain prime-agent; the adapter falls back to ~/.local/bin/prime-agent, or set an absolute `command` in the agent config.
+If the list is still empty, either `prime-agent` is neither on the server's PATH nor at `~/.local/bin/prime-agent` of the server user, or `prime-agent model list` failed for the host login (the failure is not logged). Run `prime-agent model list` as the server user to see why. The agent's `command` does not affect this list; runs and the environment test use it.
 
 **First run is slow:** Prime sets up its Python kernel once per server HOME (`› setting up python kernel (one-time, ~30s)…` on stderr).
 
