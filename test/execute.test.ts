@@ -135,3 +135,14 @@ describe("execute: child env hygiene (INTERFACES §4, §16 A8, A17, L17)", () =>
     expect(env.PRIME_AGENT_CODING_AGENT_DIR).toBe(agentDir());
   });
 });
+describe("execute: instructions file (pi-local execute.ts 574-635)", () => {
+  it("puts the instructions file first in the system prompt and reports it in onMeta notes", async () => {
+    const file = path.join(ws(), "AGENTS.md");
+    writeFileSync(file, "INSTRUCTIONS-MARKER\n");
+    const { metas } = await run({ config: { instructionsFilePath: file } });
+    const first = appendArgs(runCalls()[0]!.argv)[0];
+    expect(first).toContain("INSTRUCTIONS-MARKER");
+    expect(first).toContain(`The above agent instructions were loaded from ${file}.`);
+    expect(metas[0]!.commandNotes).toContain(`Loaded agent instructions from ${file}`);
+  });
+});

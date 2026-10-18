@@ -87,7 +87,19 @@ async function buildSystemPrompt(ctx: AdapterExecutionContext, runtime: PrimeRun
   const data = templateData(ctx);
   const text = renderTemplate(runtime.promptTemplate ?? defaultTemplate, data);
   const fallback: SystemPrompt = { text, notes: [], ownsDefaultPolicy: runtime.promptTemplate === null };
-  return fallback;
+  if (!runtime.instructionsFilePath) return fallback;
+  const file = path.resolve(cwd, runtime.instructionsFilePath);
+  const dir = `${path.dirname(runtime.instructionsFilePath)}/`;
+  try {
+    const contents = await fs.readFile(file, "utf8");
+    const withNote = `${contents}\n\nThe above agent instructions were loaded from ${file}. Resolve any relative file references from ${dir}.\n\n${defaultTemplate}`;
+    const notes = [`Loaded agent instructions from ${file}`, `Appended instructions + path directive to system prompt (relative references from ${dir}).`];
+    return { text: renderTemplate(withNote, data), notes, ownsDefaultPolicy: true };
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    await ctx.onLog("stdout", `[paperclip] Warning: could not read agent instructions file "${file}": ${reason}\n`);
+    return { ...fallback, notes: [`Configured instructionsFilePath ${file}, but file could not be read; continuing without injected instructions.`] };
+  }
 }
 function templateData({ agent, runId, context }: AdapterExecutionContext): Record<string, unknown> {
   return { agentId: agent.id, companyId: agent.companyId, runId, company: { id: agent.companyId }, agent, run: { id: runId, source: "on_demand" }, context };
