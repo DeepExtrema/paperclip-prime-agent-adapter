@@ -27,8 +27,43 @@ export const parsePrimeModelList: ParsePrimeModelList = (stdout) => {
   return rows;
 };
 
-/** Cached (60 s) `prime-agent model list` in the given agent dir. Throws PrimeCliError. */
-export const listPrimeModels: ListPrimeModels = async () => notImplemented("WP4", "listPrimeModels");
+const MODEL_LIST_TIMEOUT_SEC = 20;
+const MODEL_LIST_GRACE_SEC = 3;
+const firstNonEmptyLine = (text: string): string => text.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? "";
+
+function toAdapterModels(rows: PrimeModelRow[]): AdapterModel[] {
+  const ids = [...new Set(rows.map((row) => row.id))];
+  ids.sort((a, b) => a.localeCompare(b, "en", { numeric: true, sensitivity: "base" }));
+  return ids.map((id) => ({ id, label: id }));
+}
+
+/** Uncached `<command> model list`. Throws PrimeCliError. */
+async function discoverPrimeModels({ command, env, cwd }: Parameters<ListPrimeModels>[0]): Promise<AdapterModel[]> {
+  const agentDir = env.PRIME_AGENT_CODING_AGENT_DIR;
+  if (!agentDir || !path.isAbsolute(agentDir)) {
+    throw new PrimeCliError("prime_model_list_failed", "listPrimeModels requires env.PRIME_AGENT_CODING_AGENT_DIR set to an absolute per-agent or ephemeral agent dir.");
+  }
+  let result: RunProcessResult;
+  try {
+    // A8: env goes through unchanged, undefined entries included. runChildProcess merges process.env under it,
+    // then deletes keys whose value is undefined; its declared opts.env type omits undefined, hence the cast.
+    const runId = `prime-models-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    result = await runChildProcess(runId, command, ["model", "list"], { cwd, env: env as Record<string, string>, timeoutSec: MODEL_LIST_TIMEOUT_SEC, graceSec: MODEL_LIST_GRACE_SEC, onLog: async () => {} });
+  } catch (err) {
+    throw new PrimeCliError("prime_cli_missing", `Cannot run \`${command}\`: ${err instanceof Error ? err.message : String(err)}`, { cause: err });
+  }
+  if (result.timedOut) {
+    throw new PrimeCliError("prime_model_list_failed", `\`${command} model list\` timed out after ${MODEL_LIST_TIMEOUT_SEC} s.`);
+  }
+  const exitCode = result.exitCode ?? 1;
+  if (exitCode !== 0) {
+    const detail = firstNonEmptyLine(result.stderr) || firstNonEmptyLine(result.stdout);
+    throw new PrimeCliError("prime_model_list_failed", `\`${command} model list\` failed (exit ${exitCode})${detail ? `: ${detail}` : "."}`);
+  }
+  return toAdapterModels(parsePrimeModelList(result.stdout));
+}
+
+export const listPrimeModels: ListPrimeModels = (input) => discoverPrimeModels(input);
 
 /** ServerAdapterModule.listModels: host-credential ephemeral agent dir; [] on any failure. */
 export async function listPrimeModelsForAdapter(): Promise<AdapterModel[]> {

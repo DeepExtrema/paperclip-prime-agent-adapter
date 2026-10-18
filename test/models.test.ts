@@ -56,3 +56,64 @@ describe("model list parsing (INTERFACES §8)", () => {
     expect(models.parsePrimeModelList("")).toEqual([]);
   });
 });
+
+
+describe("model list command (INTERFACES §8)", () => {
+  async function setup(body: string) {
+    const dir = await makeScratch();
+    const agentDir = path.join(dir, "agent");
+    await fs.mkdir(agentDir);
+    const command = await fakeCommand(dir, "prime-agent-fake", body);
+    return { dir, agentDir, command, env: { PATH: "/usr/bin:/bin", PRIME_AGENT_CODING_AGENT_DIR: agentDir } };
+  }
+  it("runs `<command> model list` in the given env and returns sorted, deduplicated provider/model ids", async () => {
+    const { dir, agentDir, command, env } = await setup(
+      `[ "$1 $2" = "model list" ] || exit 9\n[ "$PRIME_AGENT_CODING_AGENT_DIR" = "$EXPECT_AGENT_DIR" ] || exit 8\ncat "${fixturePath("model-list.txt")}" "${fixturePath("model-list-api-key-anthropic.txt")}"`,
+    );
+    const result = await models.listPrimeModels({ command, env: { ...env, EXPECT_AGENT_DIR: agentDir }, cwd: dir });
+    expect(result).toHaveLength(275);
+    expect(result.slice(0, 3).map((m) => m.id)).toEqual(["anthropic/claude-fable-5", "anthropic/claude-fable-5-1", "anthropic/claude-haiku-4-5"]);
+    expect(result.at(-1)).toEqual({ id: "vercel-ai-gateway/zai/glm-5v-turbo", label: "vercel-ai-gateway/zai/glm-5v-turbo" });
+    expect(runChildProcess).toHaveBeenCalledWith(expect.stringMatching(/^prime-models-/), command, ["model", "list"], expect.objectContaining({ cwd: dir, timeoutSec: 20, graceSec: 3 }));
+  });
+  it("returns [] for the no-models message (exit 0)", async () => {
+    const { dir, command, env } = await setup(`cat "${fixturePath("model-list-no-auth.txt")}"`);
+    await expect(models.listPrimeModels({ command, env, cwd: dir })).resolves.toEqual([]);
+  });
+  it("throws prime_model_list_failed with the first output line on a non-zero exit", async () => {
+    const { dir, command, env } = await setup('echo "" >&2\necho "auth store locked" >&2\nexit 3');
+    const error = await models.listPrimeModels({ command, env, cwd: dir }).catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(PrimeCliError);
+    expect(error).toMatchObject({ code: "prime_model_list_failed", message: `\`${command} model list\` failed (exit 3): auth store locked` });
+  });
+  it("throws prime_model_list_failed on a timeout", async () => {
+    const { dir, command, env } = await setup("exit 0");
+    vi.mocked(runChildProcess).mockResolvedValueOnce({ exitCode: null, signal: "SIGTERM", timedOut: true, stdout: "", stderr: "", pid: 1, startedAt: "2026-10-18T00:00:00.000Z" });
+    await expect(models.listPrimeModels({ command, env, cwd: dir })).rejects.toMatchObject({ code: "prime_model_list_failed", message: `\`${command} model list\` timed out after 20 s.` });
+  });
+  it("throws prime_cli_missing when the command cannot be spawned", async () => {
+    const { dir, env } = await setup("exit 0");
+    const command = path.join(dir, "no-such-prime-agent");
+    const error = await models.listPrimeModels({ command, env, cwd: dir }).catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(PrimeCliError);
+    expect(error).toMatchObject({ code: "prime_cli_missing", cause: expect.any(Error) });
+    expect((error as Error).message).toContain(`Cannot run \`${command}\`: Failed to start command`);
+  });
+  it("removes keys the caller set to undefined even when the server env has them (INTERFACES §16 A8)", async () => {
+    const { dir, command, env } = await setup(`[ -z "\${PRIME_AGENT_INTERNAL_X+x}" ] || exit 7\n[ -z "\${PI_CODING_AGENT_DIR+x}" ] || exit 6\ncat "${fixturePath("model-list-api-key-anthropic.txt")}"`);
+    vi.stubEnv("PRIME_AGENT_INTERNAL_X", "1");
+    vi.stubEnv("PI_CODING_AGENT_DIR", "/x");
+    const childEnv = { ...env, PRIME_AGENT_INTERNAL_X: undefined, PI_CODING_AGENT_DIR: undefined };
+    await expect(models.listPrimeModels({ command, env: childEnv, cwd: dir })).resolves.toHaveLength(16);
+  });
+  it("refuses to run without an absolute PRIME_AGENT_CODING_AGENT_DIR and spawns nothing", async () => {
+    const { dir, command } = await setup('touch "$MARKER"');
+    for (const agentDir of [undefined, "", "relative/agent"]) {
+      const env: Record<string, string> = { PATH: "/usr/bin:/bin", MARKER: path.join(dir, "spawned") };
+      if (agentDir !== undefined) env.PRIME_AGENT_CODING_AGENT_DIR = agentDir;
+      await expect(models.listPrimeModels({ command, env, cwd: dir })).rejects.toMatchObject({ code: "prime_model_list_failed" });
+    }
+    expect(runChildProcess).not.toHaveBeenCalled();
+    await expect(fs.stat(path.join(dir, "spawned"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+});
