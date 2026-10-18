@@ -41,11 +41,23 @@ function errorText(message: Record<string, unknown>): string {
   return asString(message.errorMessage).trim() || DEFAULT_PROVIDER_ERROR;
 }
 
+function assistantEntries(state: ParserState, message: Record<string, unknown>, ts: string): UiTranscriptEntry[] {
+  const entries: UiTranscriptEntry[] = [];
+  const text = joinItems(message.content, "text", "text");
+  if (text) entries.push({ kind: "assistant", ts, text });
+  for (const item of contentItems(message.content)) {
+    if (item.type !== "toolCall") continue;
+    entries.push({ kind: "tool_call", ts, name: asString(item.name, "tool"), input: item.arguments ?? {}, toolUseId: asString(item.id) });
+  }
+  return entries;
+}
+
 function parseEvent(state: ParserState, event: Record<string, unknown>, raw: string, ts: string): UiTranscriptEntry[] {
   const type = asString(event.type);
   if (type === "session") return [{ kind: "init", ts, model: state.model, sessionId: asString(event.id) }];
   if (type === "message_end") {
     const message = asRecord(event.message);
+    if (message?.role === "assistant") return assistantEntries(state, message, ts);
     if (message?.role === "user") {
       const text = joinItems(message.content, "text", "text");
       return text ? [{ kind: "user", ts, text }] : [];

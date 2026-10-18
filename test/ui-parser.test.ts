@@ -37,3 +37,16 @@ describe("message_end: user and hidden roles", () => {
   });
   it("returns no entries for custom (harness_digest) messages", () => expect(parseStdoutLine(line("run2", 5), TS)).toEqual([]));
 });
+
+describe("message_end: assistant", () => {
+  it("maps assistant text to one assistant entry", () => {
+    expect(parseStdoutLine(line("run2", 12), TS)).toEqual([{ kind: "assistant", ts: TS, text: "OK" }]);
+  });
+  it("maps each toolCall item to a tool_call after the text", () => {
+    expect(parseStdoutLine(line("run4", 27), TS)).toEqual([
+      { kind: "assistant", ts: TS, text: "I'll compute 6*7 and get the Paperclip check phrase for you." },
+      { kind: "tool_call", ts: TS, name: "ipython", input: { code: "\n# Compute 6*7\nresult = 6 * 7\nprint(result)\n" },
+        toolUseId: "toolu_01D1iEqtRH3v2sCKAY59YkLF" },
+    ]);
+  });
+});
