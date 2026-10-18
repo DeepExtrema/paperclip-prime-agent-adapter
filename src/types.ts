@@ -138,9 +138,6 @@ export type CreateEphemeralPrimeAgentDir = (credential: PrimeCredentialConfig) =
 // Child environment (WP1, src/server/runtime-config.ts)
 // ---------------------------------------------------------------------------
 
-/** Inherited (base env) keys with these prefixes never reach the child. */
-export const PRIME_STRIPPED_ENV_PREFIXES = ["PRIME_AGENT_", "RLM_", "PI_"] as const;
-
 /** Keys the adapter owns; dropped from config/Paperclip env too, then set by the adapter or left unset. */
 export const PRIME_ADAPTER_OWNED_ENV_KEYS = [
   "PRIME_AGENT_CODING_AGENT_DIR",
@@ -153,40 +150,6 @@ export const PRIME_ADAPTER_OWNED_ENV_KEYS = [
 /** Prefixes dropped from config/Paperclip env as well as from the base env. */
 export const PRIME_ALWAYS_STRIPPED_ENV_PREFIXES = ["PRIME_AGENT_INTERNAL_", "RLM_", "PI_"] as const;
 
-/**
- * Provider credential variables found in the prime-agent 0.10.0 binary strings.
- * Dropped from the inherited base env so an agent never spends against the
- * Paperclip server's ambient keys. A value set in config.env is kept.
- * UNVERIFIED: which provider each variable belongs to.
- */
-export const PRIME_PROVIDER_CREDENTIAL_ENV_KEYS = [
-  "ANTHROPIC_API_KEY",
-  "ANTHROPIC_OAUTH_TOKEN",
-  "OPENAI_API_KEY",
-  "AZURE_OPENAI_API_KEY",
-  "PRIME_API_KEY",
-  "GEMINI_API_KEY",
-  "GOOGLE_CLOUD_API_KEY",
-  "GROQ_API_KEY",
-  "XAI_API_KEY",
-  "OPENROUTER_API_KEY",
-  "AI_GATEWAY_API_KEY",
-  "ZAI_API_KEY",
-  "MISTRAL_API_KEY",
-  "MINIMAX_API_KEY",
-  "MINIMAX_CN_API_KEY",
-  "FIREWORKS_API_KEY",
-  "KIMI_API_KEY",
-  "MOONSHOT_API_KEY",
-  "CLOUDFLARE_API_KEY",
-  "DEEPSEEK_API_KEY",
-  "CEREBRAS_API_KEY",
-  "OPENCODE_API_KEY",
-  "XIAOMI_API_KEY",
-  "XIAOMI_TOKEN_PLAN_SGP_API_KEY",
-  "XIAOMI_TOKEN_PLAN_AMS_API_KEY",
-  "XIAOMI_TOKEN_PLAN_CN_API_KEY",
-] as const;
 
 export interface PrimeChildEnv {
   /** A8: stripped keys are present with value `undefined` so runChildProcess deletes them after its own process.env merge. */
