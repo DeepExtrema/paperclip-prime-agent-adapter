@@ -123,3 +123,15 @@ describe("execute: fresh run (INTERFACES §11.3, §11.5, §11.7)", () => {
     expect([path.basename(staged), existsSync(staged)]).toEqual(["paperclip-check", false]);
   });
 });
+describe("execute: child env hygiene (INTERFACES §4, §16 A8, A17, L17)", () => {
+  it("does not pass inherited Prime, RLM or PI variables or ambient provider keys to prime-agent", async () => {
+    Object.assign(process.env, {
+      PRIME_AGENT_INTERNAL_DAEMON_WORKER_TOKEN: "leak", RLM_SESSION_DIR: "/leak", PI_CODING_AGENT_DIR: "/leak",
+      PRIME_AGENT_CODING_AGENT_DIR: "/elsewhere", ANTHROPIC_API_KEY: "ambient-key", PAPERCLIP_AGENT_JWT_SECRET: "leak",
+    });
+    await run();
+    const env = runCalls()[0]!.env;
+    expect(Object.keys(env).filter((key) => /^(PRIME_AGENT_INTERNAL_|RLM_|PI_)/.test(key) || ["ANTHROPIC_API_KEY", "PAPERCLIP_AGENT_JWT_SECRET"].includes(key))).toEqual([]);
+    expect(env.PRIME_AGENT_CODING_AGENT_DIR).toBe(agentDir());
+  });
+});
