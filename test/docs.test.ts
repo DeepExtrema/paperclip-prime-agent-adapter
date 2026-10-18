@@ -1,0 +1,47 @@
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { describe, expect, it } from "vitest";
+
+const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+const read = (rel: string) => readFileSync(path.join(repoRoot, rel), "utf8");
+
+const DOCS = ["README.md"];
+const CLAIM_LEVELS = ["registered/loaded", "deterministic-qualified", "live-qualified", "not qualified"];
+const PRIVATE_PATTERNS: Array<[string, RegExp]> = [
+  ["absolute home path", /\/home\/[^\s/`'")]+/],
+  ["uuid (company, agent, issue or run id)", /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i],
+  ["API key", /\bsk-[A-Za-z0-9_-]{8,}/],
+  ["JWT", /\beyJ[A-Za-z0-9_-]{10,}/],
+  ["private key", /-----BEGIN [A-Z ]*PRIVATE KEY-----/],
+];
+
+describe.each(DOCS)("%s", (doc) => {
+  it("exists and is not empty", () => {
+    expect(existsSync(path.join(repoRoot, doc))).toBe(true);
+    expect(read(doc).trim().length).toBeGreaterThan(200);
+  });
+
+  it("contains no private host data (L13)", () => {
+    const text = read(doc);
+    for (const [label, pattern] of PRIVATE_PATTERNS) expect(text, label).not.toMatch(pattern);
+  });
+
+  it("has only relative links that resolve", () => {
+    const text = read(doc);
+    for (const match of text.matchAll(/\]\(([^)#\s]+)(#[^)]*)?\)/g)) {
+      const target = match[1]!;
+      if (/^[a-z]+:/i.test(target)) continue;
+      expect(existsSync(path.resolve(repoRoot, path.dirname(doc), target)), target).toBe(true);
+    }
+  });
+});
+
+describe("README.md qualification table (L4)", () => {
+  it("uses only the claim levels", () => {
+    const section = read("README.md").split("\n## Qualification\n")[1]?.split("\n## ")[0] ?? "";
+    const rows = section.split("\n").filter((line) => line.startsWith("|") && !/^\|\s*-/.test(line) && !line.startsWith("| Surface"));
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) expect(CLAIM_LEVELS).toContain(row.split("|")[2]?.trim());
+  });
+});
