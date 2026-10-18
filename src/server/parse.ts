@@ -41,6 +41,18 @@ function addUsage(result: ParsedPrimeOutput, value: unknown): void {
   totals.reportedCostUsd += asCount(asObject(usage.cost)?.total);
 }
 
+/** Joined text items of a content array; a string content is returned as is (pi-local parse.ts:22-29). */
+function contentText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  let text = "";
+  for (const item of content) {
+    const part = asObject(item);
+    if (part?.type === "text" && typeof part.text === "string") text += part.text;
+  }
+  return text;
+}
+
 /** One stdout line as a JSON object, or null for blank, malformed and non-object lines. */
 function parseEventLine(line: string): JsonObject | null {
   const trimmed = line.trim();
@@ -84,6 +96,11 @@ export const parsePrimeJsonl: ParsePrimeJsonl = (stdout) => {
         const message = assistantMessage(event.message);
         if (!message) break;
         addUsage(result, message.usage);
+        const text = contentText(message.content);
+        if (text.trim()) result.messages.push(text);
+        result.lastStopReason = asText(message.stopReason) || null;
+        result.provider = asText(message.provider) || null;
+        result.model = asText(message.model) || null;
         break;
       }
       case "agent_end":

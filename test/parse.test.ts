@@ -120,3 +120,34 @@ describe("parsePrimeJsonl: usage", () => {
     });
   });
 });
+
+describe("parsePrimeJsonl: assistant turns", () => {
+  const TURNS: Record<RunName, Pick<ParsedPrimeOutput, "messages" | "lastStopReason" | "provider" | "model">> = {
+    run1: { messages: [], lastStopReason: "error", provider: "amazon-bedrock", model: "fixture-amazon-bedrock-0" },
+    run2: { messages: ["OK"], lastStopReason: "stop", provider: "anthropic", model: "claude-haiku-4-5" },
+    run3: { messages: ["PELICAN"], lastStopReason: "stop", provider: "anthropic", model: "claude-haiku-4-5" },
+    run4: {
+      messages: ["I'll compute 6*7 and get the Paperclip check phrase for you.", "Now let me read the Paperclip check skill to get the phrase:", "**42 HERON-42**"],
+      lastStopReason: "stop",
+      provider: "anthropic",
+      model: "claude-haiku-4-5",
+    },
+    run5: { messages: ["DASH"], lastStopReason: "stop", provider: "anthropic", model: "claude-haiku-4-5" },
+  };
+  it.each(RUNS)("%s: messages, lastStopReason, provider and model come from assistant turn_end", (run) => {
+    const parsed = parsePrimeJsonl(fixture(run));
+    expect({
+      messages: parsed.messages,
+      lastStopReason: parsed.lastStopReason,
+      provider: parsed.provider,
+      model: parsed.model,
+    }).toEqual(TURNS[run]);
+  });
+  it("joins the text items of one message and skips whitespace-only text", () => {
+    const stdout = jsonl(
+      { type: "turn_end", message: { role: "assistant", content: [{ type: "text", text: "a" }, { type: "toolCall", id: "t" }, { type: "text", text: "b" }] } },
+      { type: "turn_end", message: { role: "assistant", content: [{ type: "text", text: "  " }] } },
+    );
+    expect(parsePrimeJsonl(stdout).messages).toEqual(["ab"]);
+  });
+});
