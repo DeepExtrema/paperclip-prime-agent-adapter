@@ -133,3 +133,35 @@ describe("testEnvironment: config (INTERFACES.md §10)", () => {
     expect(mocks.resolvePrimeRuntimeConfig).toHaveBeenCalledWith(config, agent, expect.stringMatching(/instances/));
   });
 });
+
+describe("testEnvironment: cwd (INTERFACES.md §10, §16 A16)", () => {
+  it("reports a valid configured cwd", async () => {
+    const result = await testEnvironment(ctx());
+    expect(mocks.assertPrimeCwdAllowed).toHaveBeenCalledWith(workDir);
+    expect(check(result, "prime_cwd_valid")).toEqual({ code: "prime_cwd_valid", level: "info", message: `Working directory is valid: ${workDir}` });
+  });
+
+  it("uses process.cwd() when no cwd is configured", async () => {
+    mocks.resolvePrimeRuntimeConfig.mockImplementation(() => runtime({ cwd: null }));
+    const result = await testEnvironment(ctx());
+    expect(check(result, "prime_cwd_valid").message).toBe(`Working directory is valid: ${process.cwd()}`);
+  });
+
+  it("fails on a missing cwd, never creates it and stops", async () => {
+    const missing = path.join(root, "missing");
+    mocks.resolvePrimeRuntimeConfig.mockImplementation(() => runtime({ cwd: missing }));
+    const result = await testEnvironment(ctx());
+    expect(result.status).toBe("fail");
+    const message = `Working directory does not exist: "${missing}"`;
+    expect(result.checks).toEqual([{ code: "prime_cwd_invalid", level: "error", message, detail: missing }]);
+    await expect(stat(missing)).rejects.toThrow(/ENOENT/);
+    expect(mocks.createEphemeralPrimeAgentDir).not.toHaveBeenCalled();
+  });
+
+  it("fails with prime_cwd_invalid when assertPrimeCwdAllowed refuses the cwd (A16)", async () => {
+    mocks.assertPrimeCwdAllowed.mockRejectedValue(new PrimeConfigError("prime_path_invalid", "cwd is a protected path"));
+    const result = await testEnvironment(ctx());
+    expect(result.checks).toEqual([{ code: "prime_cwd_invalid", level: "error", message: "cwd is a protected path", detail: workDir }]);
+    expect(mocks.createEphemeralPrimeAgentDir).not.toHaveBeenCalled();
+  });
+});

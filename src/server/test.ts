@@ -65,6 +65,16 @@ export async function testEnvironment(ctx: AdapterEnvironmentTestContext): Promi
     return finish();
   }
 
+  const cwd = runtime.cwd ?? process.cwd();
+  try {
+    await assertPrimeCwdAllowed(cwd);
+    await ensureAbsoluteDirectory(cwd);
+    checks.push({ code: "prime_cwd_valid", level: "info", message: `Working directory is valid: ${cwd}` });
+  } catch (err) {
+    checks.push({ code: "prime_cwd_invalid", level: "error", message: errorMessage(err), detail: cwd });
+    return finish();
+  }
+
   // [wp5:next-step]
   return finish();
 }
