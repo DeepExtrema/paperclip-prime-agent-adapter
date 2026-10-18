@@ -1,7 +1,7 @@
 // Owner: WP5. Contract: INTERFACES.md §8, §16 A8.
 import { randomUUID } from "node:crypto";
 import { runChildProcess } from "@paperclipai/adapter-utils/server-utils";
-import { PrimeCliError, notImplemented } from "../errors.js";
+import { PrimeCliError } from "../errors.js";
 import { PRIME_SUPPORTED_VERSION_RANGE } from "../types.js";
 import type { IsSupportedPrimeVersion, ReadPrimeVersion } from "../types.js";
 
@@ -19,7 +19,34 @@ const compareCore = (a: Core, b: Core): number => a[0] - b[0] || a[1] - b[1] || 
 
 const firstLine = (text: string): string => text.split(/\r?\n/)[0]?.trim() ?? "";
 
-export const readPrimeVersion: ReadPrimeVersion = async () => notImplemented("WP5", "readPrimeVersion");
+export const readPrimeVersion: ReadPrimeVersion = async ({ command, env, cwd }) => {
+  let result;
+  try {
+    // A8: env goes to runChildProcess unchanged; it merges process.env, then deletes the undefined entries.
+    // The cast only bridges the host's `Record<string, string>` parameter type.
+    result = await runChildProcess(`prime-version-${randomUUID()}`, command, ["--version"], {
+      cwd,
+      env: env as Record<string, string>,
+      timeoutSec: VERSION_TIMEOUT_SEC,
+      graceSec: VERSION_GRACE_SEC,
+      onLog: async () => {},
+    });
+  } catch (err) {
+    throw new PrimeCliError("prime_cli_missing", err instanceof Error ? err.message : String(err), { cause: err });
+  }
+  if (result.timedOut) {
+    throw new PrimeCliError("prime_cli_version_unreadable", `"${command} --version" timed out after ${VERSION_TIMEOUT_SEC} s.`);
+  }
+  if (result.exitCode !== 0) {
+    const detail = firstLine(result.stderr) || firstLine(result.stdout);
+    throw new PrimeCliError("prime_cli_version_unreadable", `"${command} --version" exited with code ${result.exitCode ?? "null"}: ${detail}`);
+  }
+  const version = firstLine(result.stdout);
+  if (!parseCore(version)) {
+    throw new PrimeCliError("prime_cli_version_unreadable", `"${command} --version" printed "${version}", not a x.y.z version.`);
+  }
+  return version;
+};
 
 export const isSupportedPrimeVersion: IsSupportedPrimeVersion = (version) => {
   const core = parseCore(version);
