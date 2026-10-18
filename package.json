@@ -15,7 +15,7 @@
     },
     "./ui-parser": {
       "types": "./dist/ui-parser.d.ts",
-      "import": "./dist/ui-parser.js"
+      "import": "./dist/ui-parser.cjs"
     },
     "./ui": {
       "types": "./dist/ui/index.d.ts",
@@ -35,7 +35,7 @@
     "adapterUiParser": "1.0.0"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && tsc -p tsconfig.ui-parser.json && mv dist/host/ui-parser.js dist/ui-parser.cjs && rmdir dist/host",
     "clean": "rm -rf dist",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
