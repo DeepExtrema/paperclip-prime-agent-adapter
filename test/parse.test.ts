@@ -84,3 +84,39 @@ describe("parsePrimeJsonl: sawAgentEnd", () => {
     expect(parsePrimeJsonl(lines.slice(0, -1).join("\n")).sawAgentEnd).toBe(false);
   });
 });
+
+describe("parsePrimeJsonl: usage", () => {
+  const USAGE: Record<RunName, ParsedPrimeOutput["usage"]> = {
+    run1: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, cacheWriteTokens: 0, totalTokens: 0, reportedCostUsd: 0 },
+    run2: { inputTokens: 3, outputTokens: 4, cachedInputTokens: 0, cacheWriteTokens: 10553, totalTokens: 10560, reportedCostUsd: 0 },
+    run3: { inputTokens: 3, outputTokens: 6, cachedInputTokens: 10553, cacheWriteTokens: 19, totalTokens: 10581, reportedCostUsd: 0 },
+    run4: { inputTokens: 15, outputTokens: 237, cachedInputTokens: 21440, cacheWriteTokens: 10964, totalTokens: 32656, reportedCostUsd: 0 },
+    run5: { inputTokens: 3, outputTokens: 5, cachedInputTokens: 0, cacheWriteTokens: 10559, totalTokens: 10567, reportedCostUsd: 0.01322675 },
+  };
+  it.each(RUNS)("%s: usage is the sum over assistant turn_end messages only", (run) => {
+    expect(parsePrimeJsonl(fixture(run)).usage).toEqual(USAGE[run]);
+  });
+  it("ignores usage on message_end and message_update", () => {
+    const usage = { input: 5, output: 5, cacheRead: 5, cacheWrite: 5, totalTokens: 20, cost: { total: 1 } };
+    const stdout = jsonl(
+      { type: "message_update", message: { role: "assistant", usage } },
+      { type: "message_end", message: { role: "assistant", content: [], usage } },
+    );
+    expect(parsePrimeJsonl(stdout).usage).toBeNull();
+  });
+  it("stays null when the assistant turn_end has no usage object", () => {
+    const stdout = jsonl({ type: "turn_end", message: { role: "assistant", content: [{ type: "text", text: "hi" }] } });
+    expect(parsePrimeJsonl(stdout).usage).toBeNull();
+  });
+  it("counts missing or non-numeric usage fields as 0", () => {
+    const stdout = jsonl({ type: "turn_end", message: { role: "assistant", usage: { input: 2, output: "x", cost: null } } });
+    expect(parsePrimeJsonl(stdout).usage).toEqual({
+      inputTokens: 2,
+      outputTokens: 0,
+      cachedInputTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 0,
+      reportedCostUsd: 0,
+    });
+  });
+});

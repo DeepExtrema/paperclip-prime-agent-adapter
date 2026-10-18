@@ -12,6 +12,35 @@ function asText(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
+function asCount(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function assistantMessage(value: unknown): JsonObject | null {
+  const message = asObject(value);
+  return message?.role === "assistant" ? message : null;
+}
+
+/** Adds one assistant message's usage; creates the totals on the first usage object seen. */
+function addUsage(result: ParsedPrimeOutput, value: unknown): void {
+  const usage = asObject(value);
+  if (!usage) return;
+  const totals = (result.usage ??= {
+    inputTokens: 0,
+    outputTokens: 0,
+    cachedInputTokens: 0,
+    cacheWriteTokens: 0,
+    totalTokens: 0,
+    reportedCostUsd: 0,
+  });
+  totals.inputTokens += asCount(usage.input);
+  totals.outputTokens += asCount(usage.output);
+  totals.cachedInputTokens += asCount(usage.cacheRead);
+  totals.cacheWriteTokens += asCount(usage.cacheWrite);
+  totals.totalTokens += asCount(usage.totalTokens);
+  totals.reportedCostUsd += asCount(asObject(usage.cost)?.total);
+}
+
 /** One stdout line as a JSON object, or null for blank, malformed and non-object lines. */
 function parseEventLine(line: string): JsonObject | null {
   const trimmed = line.trim();
@@ -51,6 +80,12 @@ export const parsePrimeJsonl: ParsePrimeJsonl = (stdout) => {
           result.sessionCwd = asText(event.cwd) || null;
         }
         break;
+      case "turn_end": {
+        const message = assistantMessage(event.message);
+        if (!message) break;
+        addUsage(result, message.usage);
+        break;
+      }
       case "agent_end":
         result.sawAgentEnd = true;
         break;
