@@ -89,3 +89,21 @@ describe("message_end: toolResult (INTERFACES §16 A5)", () => {
     ]);
   });
 });
+
+describe("agent_end", () => {
+  const result = { kind: "result", ts: TS, subtype: "end" };
+  it("maps agent_end to result with the usage summed over its assistant messages", () => {
+    expect(parseStdoutLine(last("run4"), TS)).toEqual([
+      { ...result, text: "Run completed", inputTokens: 15, outputTokens: 237, cachedTokens: 21440, costUsd: 0, isError: false, errors: [] },
+    ]);
+  });
+  it("never shows Prime's cost estimate as a cost (INTERFACES §16 A3)", () => {
+    expect(parseStdoutLine(last("run5"), TS)).toMatchObject([{ kind: "result", costUsd: 0, inputTokens: 3, outputTokens: 5 }]);
+  });
+  it("marks a run with a provider error as failed", () => {
+    expect(parseStdoutLine(last("run1"), TS)).toEqual([
+      { ...result, text: "Run failed", inputTokens: 0, outputTokens: 0, cachedTokens: 0, costUsd: 0, isError: true,
+        errors: ["No AWS credentials available for Bedrock"] },
+    ]);
+  });
+});

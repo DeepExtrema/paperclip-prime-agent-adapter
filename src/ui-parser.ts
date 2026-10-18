@@ -62,6 +62,23 @@ function toolResultEntry(message: Record<string, unknown>, ts: string): UiTransc
     content: text || JSON.stringify(message.content ?? null), isError: message.isError === true };
 }
 
+/** Token usage of this run's assistant messages, counted once (L14); costUsd 0: Prime's cost is an estimate (§16 A3). */
+function resultEntry(event: Record<string, unknown>, ts: string): UiTranscriptEntry {
+  let [inputTokens, outputTokens, cachedTokens] = [0, 0, 0];
+  const errors: string[] = [];
+  for (const message of contentItems(event.messages)) {
+    if (message.role !== "assistant") continue;
+    const usage = asRecord(message.usage);
+    inputTokens += asNumber(usage?.input);
+    outputTokens += asNumber(usage?.output);
+    cachedTokens += asNumber(usage?.cacheRead);
+    if (message.stopReason === "error" && !errors.includes(errorText(message))) errors.push(errorText(message));
+  }
+  const isError = errors.length > 0;
+  const text = isError ? "Run failed" : "Run completed";
+  return { kind: "result", ts, text, inputTokens, outputTokens, cachedTokens, costUsd: 0, subtype: "end", isError, errors };
+}
+
 function parseEvent(state: ParserState, event: Record<string, unknown>, raw: string, ts: string): UiTranscriptEntry[] {
   const type = asString(event.type);
   if (type === "session") return [{ kind: "init", ts, model: state.model, sessionId: asString(event.id) }];
@@ -75,6 +92,7 @@ function parseEvent(state: ParserState, event: Record<string, unknown>, raw: str
     }
     return [];
   }
+  if (type === "agent_end") return [resultEntry(event, ts)];
   return [{ kind: "stdout", ts, text: raw }]; // unknown event type
 }
 
