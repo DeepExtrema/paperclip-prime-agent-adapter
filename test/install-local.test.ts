@@ -86,4 +86,25 @@ describe("scripts/install-local.sh", () => {
       await stub.close();
     }
   });
+  it("exits 4 when Paperclip refuses the install", async () => {
+    const stub = await stubPaperclip(403, loaded);
+    try {
+      const result = await runScript(["--api-url", stub.apiUrl, "--skip-build"]);
+      expect(result.code).toBe(4);
+      expect(result.stderr).toContain("install failed: HTTP 403");
+    } finally {
+      await stub.close();
+    }
+  });
+
+  it("exits 5 when the adapter is not loaded as external", async () => {
+    const stub = await stubPaperclip(201, { type: "prime_agent_local", loaded: false, source: "external" });
+    try {
+      const result = await runScript(["--api-url", stub.apiUrl, "--skip-build"]);
+      expect(result.code).toBe(5);
+      expect(result.stderr).toContain("prime_agent_local is not loaded as an external adapter");
+    } finally {
+      await stub.close();
+    }
+  });
 });

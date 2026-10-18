@@ -34,6 +34,16 @@ if [ -n "${PAPERCLIP_BOARD_TOKEN:-}" ]; then
   auth=(-H "Authorization: Bearer ${PAPERCLIP_BOARD_TOKEN}")
 fi
 body="$(node -e 'process.stdout.write(JSON.stringify({ packageName: process.argv[1], isLocalPath: true }))' "$repo_root")"
-curl -sS -o /dev/null -X POST "$api_url/adapters/install" -H 'Content-Type: application/json' "${auth[@]}" -d "$body"
-curl -sS -o /dev/null "${auth[@]}" "$api_url/adapters/prime_agent_local"
+response="$(curl -sS -w '\n%{http_code}' -X POST "$api_url/adapters/install" -H 'Content-Type: application/json' "${auth[@]}" -d "$body")"
+status="${response##*$'\n'}"
+if [ "$status" != "201" ]; then
+  echo "install failed: HTTP $status ${response%$'\n'*}" >&2
+  exit 4
+fi
+
+adapter="$(curl -sS "${auth[@]}" "$api_url/adapters/prime_agent_local")"
+if ! node -e 'const a = JSON.parse(process.argv[1]); process.exit(a.loaded === true && a.source === "external" ? 0 : 1)' "$adapter"; then
+  echo "prime_agent_local is not loaded as an external adapter: $adapter" >&2
+  exit 5
+fi
 echo "prime_agent_local registered from $repo_root (loaded, external)"
