@@ -302,7 +302,6 @@ export const buildPrimeChildEnv: BuildPrimeChildEnv = (base, plan, paperclipEnv)
 
 // §16 A15
 
-/** INTERFACES §16 A15/A16 (stub until WP1). Rejects with PrimeConfigError("prime_path_invalid") for a protected cwd. */
 /** §16 A15 (corrected): refuse an execution cwd inside ~/.prime/agent or Paperclip state, before any mkdir.
  * Paperclip state = the Paperclip home (resolved and ~/.paperclip) except <instanceRoot>/workspaces/* and projects/*.
  * HOME and the instance root are read on every call (never at import time): tests and WP3 change HOME at runtime. Real paths. */
