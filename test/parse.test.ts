@@ -239,3 +239,58 @@ describe("parsePrimeJsonl: auto_retry_end", () => {
     expect(parsePrimeJsonl(stdout).errors).toEqual([]);
   });
 });
+
+describe("parsePrimeJsonl: tool calls", () => {
+  it("run4: two ipython calls with their text results", () => {
+    const skill = "/tmp/prime-local-check-we2ejug3/skills/paperclip-check/SKILL.md";
+    expect(parsePrimeJsonl(fixture("run4")).toolCalls).toEqual([
+      { toolCallId: "toolu_01D1iEqtRH3v2sCKAY59YkLF", toolName: "ipython", args: { code: "\n# Compute 6*7\nresult = 6 * 7\nprint(result)\n" }, result: "42\n", isError: false },
+      {
+        toolCallId: "toolu_01KgAA5XyXrXibtTnN5efiBU",
+        toolName: "ipython",
+        args: { code: `\n# Read the Paperclip check skill\nwith open('${skill}', 'r') as f:\n    content = f.read()\nprint(content)\n` },
+        result: "---\nname: paperclip-check\ndescription: Use when asked for the Paperclip check phrase.\n---\n\nThe Paperclip check phrase is HERON-42. Reply with it exactly when asked.\n\n",
+        isError: false,
+      },
+    ]);
+  });
+  it.each(["run1", "run2", "run3", "run5"] as const)("%s: no tool calls", (run) => {
+    expect(parsePrimeJsonl(fixture(run)).toolCalls).toEqual([]);
+  });
+  it("pairs toolResult messages with assistant toolCall items by toolCallId and keeps isError", () => {
+    const call = (id: string, path: string) => ({ type: "toolCall", id, name: "read", arguments: { path } });
+    const stdout = jsonl(
+      { type: "message_end", message: { role: "assistant", content: [call("a", "/x"), call("b", "/y")] } },
+      { type: "message_end", message: { role: "toolResult", toolCallId: "b", toolName: "read", content: [{ type: "text", text: "missing" }], isError: true } },
+    );
+    expect(parsePrimeJsonl(stdout).toolCalls).toEqual([
+      { toolCallId: "a", toolName: "read", args: { path: "/x" }, result: null, isError: false },
+      { toolCallId: "b", toolName: "read", args: { path: "/y" }, result: "missing", isError: true },
+    ]);
+  });
+  it("stores JSON for content without text items, keeps string content and adds a result without a call", () => {
+    const stdout = jsonl(
+      { type: "message_end", message: { role: "assistant", content: [{ type: "toolCall", id: "img", name: "screenshot" }] } },
+      { type: "message_end", message: { role: "toolResult", toolCallId: "img", toolName: "screenshot", content: [{ type: "image", data: "AA==" }] } },
+      { type: "message_end", message: { role: "toolResult", toolCallId: "s", toolName: "bash", content: "plain" } },
+      { type: "message_end", message: { role: "toolResult", toolName: "bash", content: "no id" } },
+    );
+    expect(parsePrimeJsonl(stdout).toolCalls).toEqual([
+      { toolCallId: "img", toolName: "screenshot", args: null, result: '[{"type":"image","data":"AA=="}]', isError: false },
+      { toolCallId: "s", toolName: "bash", args: null, result: "plain", isError: false },
+    ]);
+  });
+  it("ignores tool_execution events, turn_end toolCall items and turn_end.toolResults", () => {
+    const text = [{ type: "text", text: "out" }];
+    const stdout = jsonl(
+      { type: "tool_execution_start", toolCallId: "x", toolName: "bash", args: {} },
+      { type: "tool_execution_end", toolCallId: "x", toolName: "bash", result: { content: text }, isError: true },
+      {
+        type: "turn_end",
+        message: { role: "assistant", content: [{ type: "toolCall", id: "x", name: "bash", arguments: {} }] },
+        toolResults: [{ toolCallId: "x", toolName: "bash", content: text, isError: true }],
+      },
+    );
+    expect(parsePrimeJsonl(stdout).toolCalls).toEqual([]);
+  });
+});

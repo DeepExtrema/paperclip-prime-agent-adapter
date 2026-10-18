@@ -77,6 +77,37 @@ function recordProviderFailure(result: ParsedPrimeOutput, value: unknown): void 
   addError(result, asText(message.errorMessage).trim() || PROVIDER_FAILURE_FALLBACK);
 }
 
+/** Joined text items of a toolResult `content`; a string as is; otherwise its JSON (INTERFACES §6, §16 A5). */
+function toolResultText(content: unknown): string {
+  if (typeof content === "string") return content;
+  const hasText = Array.isArray(content) && content.some((item) => asObject(item)?.type === "text");
+  return hasText ? contentText(content) : JSON.stringify(content ?? null);
+}
+
+/** Tool calls from assistant `toolCall` items; result and isError from `toolResult` messages (INTERFACES §16 A1, A5). */
+function recordToolMessage(result: ParsedPrimeOutput, value: unknown): void {
+  const message = asObject(value);
+  if (message?.role === "assistant" && Array.isArray(message.content)) {
+    for (const item of message.content) {
+      const part = asObject(item);
+      const toolCallId = asText(part?.id);
+      if (part?.type !== "toolCall" || !toolCallId) continue;
+      if (result.toolCalls.some((call) => call.toolCallId === toolCallId)) continue;
+      result.toolCalls.push({ toolCallId, toolName: asText(part.name), args: part.arguments ?? null, result: null, isError: false });
+    }
+  }
+  if (message?.role !== "toolResult") return;
+  const toolCallId = asText(message.toolCallId);
+  if (!toolCallId) return;
+  let call = result.toolCalls.find((candidate) => candidate.toolCallId === toolCallId);
+  if (!call) {
+    call = { toolCallId, toolName: asText(message.toolName), args: null, result: null, isError: false };
+    result.toolCalls.push(call);
+  }
+  call.result = toolResultText(message.content);
+  call.isError = message.isError === true;
+}
+
 /** One stdout line as a JSON object, or null for blank, malformed and non-object lines. */
 function parseEventLine(line: string): JsonObject | null {
   const trimmed = line.trim();
@@ -118,6 +149,7 @@ export const parsePrimeJsonl: ParsePrimeJsonl = (stdout) => {
         }
         break;
       case "message_end":
+        recordToolMessage(result, event.message);
         recordProviderFailure(result, event.message);
         break;
       case "turn_end": {
