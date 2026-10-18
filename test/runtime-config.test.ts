@@ -1,8 +1,9 @@
+import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PrimeConfigError } from "../src/errors.js";
-import { resolvePrimeRuntimeConfig } from "../src/server/runtime-config.js";
+import { resolvePrimeDefaultCommand, resolvePrimeRuntimeConfig } from "../src/server/runtime-config.js";
 import { PRIME_THINKING_LEVELS } from "../src/types.js";
 const AGENT = { id: "agent-1", companyId: "company-1" };
 const INSTANCE_ROOT = "/srv/paperclip/instances/default";
@@ -14,6 +15,43 @@ function configErrorCode(config: Record<string, unknown>, agent = AGENT, instanc
   }
   return "no error";
 }
+
+describe("resolvePrimeDefaultCommand", () => {
+  let home: string;
+  let bin: string;
+  beforeEach(async () => {
+    home = await fs.mkdtemp(path.join(os.tmpdir(), "prime-default-command-"));
+    bin = path.join(home, "bin");
+    await fs.mkdir(bin);
+    vi.stubEnv("HOME", home);
+  });
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    await fs.rm(home, { recursive: true, force: true });
+  });
+  it("keeps the bare command when an executable is on PATH, ahead of the fallback", async () => {
+    await fs.writeFile(path.join(bin, "prime-agent"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    const fallbackBin = path.join(home, ".local", "bin");
+    await fs.mkdir(fallbackBin, { recursive: true });
+    await fs.writeFile(path.join(fallbackBin, "prime-agent"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    await expect(resolvePrimeDefaultCommand({ PATH: `${path.join(home, "missing")}${path.delimiter}${bin}` })).resolves.toBe("prime-agent");
+  });
+  it("uses the executable home fallback when PATH has no executable command", async () => {
+    await fs.writeFile(path.join(bin, "prime-agent"), "not executable", { mode: 0o644 });
+    const fallbackBin = path.join(home, ".local", "bin");
+    await fs.mkdir(fallbackBin, { recursive: true });
+    const fallback = path.join(fallbackBin, "prime-agent");
+    await fs.writeFile(fallback, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    await expect(resolvePrimeDefaultCommand({ PATH: bin })).resolves.toBe(fallback);
+  });
+  it("keeps the bare command when neither PATH nor the fallback is executable", async () => {
+    await expect(resolvePrimeDefaultCommand({ PATH: bin })).resolves.toBe("prime-agent");
+    const fallbackBin = path.join(home, ".local", "bin");
+    await fs.mkdir(fallbackBin, { recursive: true });
+    await fs.writeFile(path.join(fallbackBin, "prime-agent"), "not executable", { mode: 0o644 });
+    await expect(resolvePrimeDefaultCommand({})).resolves.toBe("prime-agent");
+  });
+});
 
 describe("resolvePrimeRuntimeConfig mapping (INTERFACES §2)", () => {
   it("applies the defaults and the agent dir layout", () => {
