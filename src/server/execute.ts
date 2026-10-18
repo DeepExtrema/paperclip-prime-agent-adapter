@@ -171,7 +171,20 @@ async function runPrime(ctx: AdapterExecutionContext, prep: PreparedRun): Promis
   const { runtime, cwd } = prep;
   const system = await buildSystemPrompt(ctx, runtime, cwd);
   const notes = [...prep.seeded.notes, ...system.notes];
-  const resumeSessionFile: string | null = null;
+  const saved = primeSessionCodec.deserialize(ctx.runtime.sessionParams) as PrimeSessionParams | null;
+  const header = saved ? await readPrimeSessionHeader(saved.sessionFile) : null;
+  const decision = decidePrimeResume({
+    saved,
+    current: { cwd, provider: runtime.provider, model: runtime.model, agentDir: runtime.agentDir.agentDir },
+    header,
+  });
+  if (saved && !decision.resume) {
+    await ctx.onLog(
+      "stdout",
+      `[paperclip] Prime session "${saved.sessionId}" will not be resumed (${decision.reason}); starting a fresh session.\n`,
+    );
+  }
+  const resumeSessionFile = decision.resume ? decision.sessionFile : null;
   const first = await runAttempt(ctx, prep, system, notes, resumeSessionFile);
   return mapResult(first, prep, false);
 }

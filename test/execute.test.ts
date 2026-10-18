@@ -146,3 +146,20 @@ describe("execute: instructions file (pi-local execute.ts 574-635)", () => {
     expect(metas[0]!.commandNotes).toContain(`Loaded agent instructions from ${file}`);
   });
 });
+describe("execute: resume (INTERFACES §11.4, §7, §16 A2)", () => {
+  const notResumed = (reason: string) => ["stdout", `[paperclip] Prime session "${SESSION2}" will not be resumed (${reason}); starting a fresh session.\n`];
+  it("resumes a matching saved session with -r and keeps its params", async () => {
+    const saved = writeSavedSession();
+    const { result } = await run({ sessionParams: saved, env: { FAKE_PRIME_STDOUT_FILE: RUN3 } });
+    expect(runCalls()[0]!.argv.slice(11, 13)).toEqual(["-r", saved.sessionFile]);
+    expect(result.sessionParams).toEqual(saved);
+    expect(result.summary).toBe("PELICAN");
+  });
+  it("never passes a missing session file to -r", async () => {
+    const saved = writeSavedSession();
+    rmSync(saved.sessionFile);
+    const { logs } = await run({ sessionParams: saved });
+    expect(runCalls()[0]!.argv).not.toContain("-r");
+    expect(logs).toContainEqual(notResumed("session_file_missing"));
+  });
+});
