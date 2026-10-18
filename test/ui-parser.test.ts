@@ -107,3 +107,29 @@ describe("agent_end", () => {
     ]);
   });
 });
+
+describe("whole runs", () => {
+  const parseRun = (run: string) => {
+    const parser = createStdoutParser();
+    return runLines(run).flatMap((l) => parser.parseLine(l, TS));
+  };
+  it("renders run2 as init, user, assistant, result with nothing else", () => {
+    expect(parseRun("run2")).toEqual([
+      { kind: "init", ts: TS, model: "", sessionId: "01a14c2a-5965-7269-8920-97d0da73b791" },
+      { kind: "user", ts: TS, text: "Remember the code word PELICAN. Reply with exactly OK." },
+      { kind: "assistant", ts: TS, text: "OK" },
+      { kind: "result", ts: TS, text: "Run completed", inputTokens: 3, outputTokens: 4, cachedTokens: 0, costUsd: 0, subtype: "end",
+        isError: false, errors: [] },
+    ]);
+  });
+  it("renders run4 tool calls once each, paired with their results", () => {
+    const entries = parseRun("run4");
+    expect(entries.map((e) => e.kind)).toEqual(
+      ["init", "user", "assistant", "tool_call", "tool_result", "assistant", "tool_call", "tool_result", "assistant", "result"]);
+    const calls = entries.flatMap((e) => (e.kind === "tool_call" ? [e.toolUseId] : []));
+    expect(entries.flatMap((e) => (e.kind === "tool_result" ? [e.toolUseId] : []))).toEqual(calls);
+  });
+  it("renders run1 as init, user, stderr, failed result", () => {
+    expect(parseRun("run1").map((e) => e.kind)).toEqual(["init", "user", "stderr", "result"]);
+  });
+});

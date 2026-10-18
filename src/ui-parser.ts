@@ -12,6 +12,9 @@ type UiTranscriptEntry =
 type ParserState = { model: string };
 
 const DEFAULT_PROVIDER_ERROR = "Prime provider request failed.";
+/** Text, tool calls and tool results come from message_end only (INTERFACES §12, §16 A5); these would duplicate them. */
+const IGNORED_EVENT_TYPES = ["agent_start", "turn_start", "turn_end", "message_start", "message_update", "tool_execution_start",
+  "tool_execution_update", "tool_execution_end"];
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
@@ -93,6 +96,7 @@ function parseEvent(state: ParserState, event: Record<string, unknown>, raw: str
     return [];
   }
   if (type === "agent_end") return [resultEntry(event, ts)];
+  if (IGNORED_EVENT_TYPES.includes(type)) return [];
   return [{ kind: "stdout", ts, text: raw }]; // unknown event type
 }
 
