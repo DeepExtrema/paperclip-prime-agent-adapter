@@ -7,14 +7,13 @@ import type { AdapterModel } from "@paperclipai/adapter-utils";
 import { runChildProcess, type RunProcessResult } from "@paperclipai/adapter-utils/server-utils";
 import { PrimeCliError } from "../errors.js";
 import {
-  PRIME_DEFAULT_COMMAND,
   type DetectPrimeModel,
   type EphemeralPrimeAgentDir,
   type ListPrimeModels,
   type ParsePrimeModelList,
   type PrimeModelRow,
 } from "../types.js";
-import { buildPrimeChildEnv, createEphemeralPrimeAgentDir, seedPrimeAgentDir } from "./runtime-config.js";
+import { buildPrimeChildEnv, createEphemeralPrimeAgentDir, resolvePrimeDefaultCommand, seedPrimeAgentDir } from "./runtime-config.js";
 
 export const parsePrimeModelList: ParsePrimeModelList = (stdout) => {
   const rows: PrimeModelRow[] = [];
@@ -112,7 +111,8 @@ async function loadHostModels(): Promise<AdapterModel[]> {
     ephemeral = await createEphemeralPrimeAgentDir({ mode: "host_auth", hostAuthFile: path.join(os.homedir(), ".prime", "agent", "auth.json") });
     await seedPrimeAgentDir(ephemeral.plan, { provider: "", env: {} });
     const { env } = buildPrimeChildEnv(process.env, ephemeral.plan, {});
-    const models = await discoverPrimeModels({ command: PRIME_DEFAULT_COMMAND, env, cwd: ephemeral.plan.agentDir });
+    const command = await resolvePrimeDefaultCommand(process.env);
+    const models = await discoverPrimeModels({ command, env, cwd: ephemeral.plan.agentDir });
     hostModelsCache = { expiresAt: Date.now() + MODELS_CACHE_TTL_MS, models };
     return models;
   } catch {

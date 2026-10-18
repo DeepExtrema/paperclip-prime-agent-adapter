@@ -111,6 +111,7 @@ export const resolvePrimeRuntimeConfig: ResolvePrimeRuntimeConfig = (config, age
   const extraArgs = asStringArray(config.extraArgs);
   const env = Object.entries(parseObject(config.env)).filter((entry): entry is [string, string] => typeof entry[1] === "string");
   return {
+    // Execute resolves against the child PATH; listModels uses resolvePrimeDefaultCommand for the server.
     command: trimmedText(config.command) ?? PRIME_DEFAULT_COMMAND,
     modelRef, provider, model, thinking, cwd,
     instructionsFilePath: trimmedText(config.instructionsFilePath),
