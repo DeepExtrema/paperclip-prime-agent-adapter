@@ -72,8 +72,19 @@ async function buildPaperclipRunEnv(ctx: AdapterExecutionContext, runtime: Prime
   if (ctx.authToken) env.PAPERCLIP_API_KEY = ctx.authToken;
   return { cwd, env };
 }
+/** errorMeta.primeErrorCode: the `code` of any adapter error class (codes start with "prime_"), else null. */
+function preflightFailure(err: unknown): AdapterExecutionResult {
+  const code = err instanceof Error ? (err as Error & { code?: unknown }).code : undefined;
+  const primeErrorCode = typeof code === "string" && code.startsWith("prime_") ? code : null;
+  const errorMessage = err instanceof Error ? err.message : String(err);
+  return { exitCode: 1, signal: null, timedOut: false, errorCode: "prime_preflight_failed", errorMessage, errorMeta: { primeErrorCode }, clearSession: false };
+}
 /** INTERFACES §11.3: every step before spawn. */
 async function prepareRun(ctx: AdapterExecutionContext, startedAtMs: number): Promise<PreparedRun> {
+  const target = readAdapterExecutionTarget({ executionTarget: ctx.executionTarget, legacyRemoteExecution: ctx.executionTransport?.remoteExecution });
+  if (adapterExecutionTargetIsRemote(target)) {
+    throw new Error(`prime_agent_local runs only on the local Paperclip host in phase 1; refusing ${describeAdapterExecutionTarget(target)}.`);
+  }
   const runtime = resolvePrimeRuntimeConfig(ctx.config, ctx.agent, resolvePaperclipInstanceRootForAdapter());
   const { cwd, env: paperclipEnv } = await buildPaperclipRunEnv(ctx, runtime);
   const { env: childEnv } = buildPrimeChildEnv(process.env, runtime.agentDir, paperclipEnv);
@@ -226,7 +237,12 @@ async function runPrime(ctx: AdapterExecutionContext, prep: PreparedRun): Promis
 }
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
   const startedAtMs = Date.now();
-  const prep = await prepareRun(ctx, startedAtMs);
+  let prep: PreparedRun;
+  try {
+    prep = await prepareRun(ctx, startedAtMs);
+  } catch (err) {
+    return preflightFailure(err);
+  }
   try {
     return await runPrime(ctx, prep);
   } finally {

@@ -230,3 +230,17 @@ describe("execute: onLog streaming (pi-local execute.ts 714-753)", () => {
     expect(chunks.join("")).toBe(readFileSync(RUN2, "utf8"));
   });
 });
+describe("execute: preflight refusals (INTERFACES §11.2, §11.3)", () => {
+  it("returns prime_preflight_failed without a run when the host auth file is missing", async () => {
+    const { result } = await run({ config: { hostAuthFile: path.join(root, "missing-auth.json") } });
+    const meta = { errorMeta: { primeErrorCode: "prime_host_auth_missing" }, clearSession: false, errorMessage: expect.any(String) };
+    expect(result).toEqual({ exitCode: 1, signal: null, timedOut: false, errorCode: "prime_preflight_failed", ...meta });
+    expect(runCalls()).toEqual([]);
+  });
+  it("refuses a remote execution target before any prime-agent call", async () => {
+    const { result } = await run({ executionTarget: { kind: "remote", transport: "sandbox", remoteCwd: "/workspace" } });
+    expect(result).toMatchObject({ exitCode: 1, errorCode: "prime_preflight_failed", errorMeta: { primeErrorCode: null } });
+    expect(result.errorMessage).toContain("runs only on the local Paperclip host");
+    expect(calls()).toEqual([]);
+  });
+});
