@@ -63,7 +63,39 @@ async function discoverPrimeModels({ command, env, cwd }: Parameters<ListPrimeMo
   return toAdapterModels(parsePrimeModelList(result.stdout));
 }
 
-export const listPrimeModels: ListPrimeModels = (input) => discoverPrimeModels(input);
+const MODELS_CACHE_TTL_MS = 60_000;
+const VOLATILE_ENV_KEY_PREFIXES = ["PAPERCLIP_", "npm_", "NPM_"] as const;
+const VOLATILE_ENV_KEY_EXACT = new Set(["PWD", "OLDPWD", "SHLVL", "_", "TERM_SESSION_ID"]);
+const discoveryCache = new Map<string, { expiresAt: number; models: AdapterModel[] }>();
+const isVolatileEnvKey = (key: string): boolean =>
+  VOLATILE_ENV_KEY_EXACT.has(key) || VOLATILE_ENV_KEY_PREFIXES.some((prefix) => key.startsWith(prefix));
+
+/** A stripped key (value undefined, INTERFACES §16 A8) keys differently from an absent, inherited one. */
+function discoveryCacheKey(command: string, cwd: string, env: Record<string, string | undefined>): string {
+  const envKey = Object.entries(env)
+    .filter(([key]) => !isVolatileEnvKey(key))
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, value]) => `${key}=${value === undefined ? "<unset>" : createHash("sha256").update(value).digest("hex")}`)
+    .join("\n");
+  return `${command}\n${cwd}\n${env.PRIME_AGENT_CODING_AGENT_DIR ?? ""}\n${envKey}`;
+}
+
+/** Cached (60 s) `prime-agent model list` in the given agent dir. Throws PrimeCliError. */
+export const listPrimeModels: ListPrimeModels = async (input) => {
+  const key = discoveryCacheKey(input.command, input.cwd, input.env);
+  const now = Date.now();
+  for (const [cachedKey, entry] of discoveryCache) if (entry.expiresAt <= now) discoveryCache.delete(cachedKey);
+  const cached = discoveryCache.get(key);
+  if (cached) return cached.models;
+  const models = await discoverPrimeModels(input);
+  discoveryCache.set(key, { expiresAt: now + MODELS_CACHE_TTL_MS, models });
+  return models;
+};
+
+/** Test helper: clears the model caches. */
+export function resetPrimeModelsCacheForTests(): void {
+  discoveryCache.clear();
+}
 
 /** ServerAdapterModule.listModels: host-credential ephemeral agent dir; [] on any failure. */
 export async function listPrimeModelsForAdapter(): Promise<AdapterModel[]> {

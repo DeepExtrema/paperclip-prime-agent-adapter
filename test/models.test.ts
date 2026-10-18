@@ -117,3 +117,36 @@ describe("model list command (INTERFACES §8)", () => {
     await expect(fs.stat(path.join(dir, "spawned"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 });
+
+
+describe("model list cache (INTERFACES §8)", () => {
+  it("reuses a result for 60 s per command, cwd, agent dir and env", async () => {
+    models.resetPrimeModelsCacheForTests();
+    const dir = await makeScratch();
+    const counter = path.join(dir, "count");
+    const command = await fakeCommand(dir, "prime-agent-fake", `echo run >> "${counter}"\ncat "${fixturePath("model-list-api-key-anthropic.txt")}"`);
+    const env = { PATH: "/usr/bin:/bin", PRIME_AGENT_CODING_AGENT_DIR: path.join(dir, "agent-a") };
+    const runs = async () => (await fs.readFile(counter, "utf8")).split("\n").filter(Boolean).length;
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000_000);
+    const first = await models.listPrimeModels({ command, env, cwd: dir });
+    expect(first).toHaveLength(16);
+    expect(await models.listPrimeModels({ command, env, cwd: dir })).toBe(first);
+    expect(await runs()).toBe(1);
+    await models.listPrimeModels({ command, env: { ...env, PRIME_AGENT_CODING_AGENT_DIR: path.join(dir, "agent-b") }, cwd: dir });
+    expect(await runs()).toBe(2);
+    await models.listPrimeModels({ command, env: { ...env, ANTHROPIC_API_KEY: "fake-key" }, cwd: dir });
+    expect(await runs()).toBe(3);
+    await models.listPrimeModels({ command, env: { ...env, PAPERCLIP_RUN_ID: "run-1" }, cwd: dir });
+    expect(await runs()).toBe(3);
+    await models.listPrimeModels({ command, env: { ...env, PI_CODING_AGENT_DIR: undefined }, cwd: dir });
+    expect(await runs()).toBe(4);
+    await models.listPrimeModels({ command, env: { ...env, PI_CODING_AGENT_DIR: undefined }, cwd: dir });
+    expect(await runs()).toBe(4);
+    now.mockReturnValue(1_000_000 + 60_000);
+    await models.listPrimeModels({ command, env, cwd: dir });
+    expect(await runs()).toBe(5);
+    models.resetPrimeModelsCacheForTests();
+    await models.listPrimeModels({ command, env, cwd: dir });
+    expect(await runs()).toBe(6);
+  });
+});
