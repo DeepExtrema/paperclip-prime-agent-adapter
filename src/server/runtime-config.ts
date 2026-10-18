@@ -37,7 +37,13 @@ function absolutePath(value: unknown, key: string): string | null {
 
 function splitModelRef(value: unknown): { modelRef: string; provider: string; model: string } {
   const modelRef = trimmedText(value) ?? "";
+  if (modelRef === "") {
+    throw new PrimeConfigError("prime_model_required", "adapterConfig.model is required as provider/modelId (for example anthropic/claude-haiku-4-5).");
+  }
   const slash = modelRef.indexOf("/");
+  if (slash <= 0 || slash === modelRef.length - 1) {
+    throw new PrimeConfigError("prime_model_invalid", `adapterConfig.model "${modelRef}" must be provider/modelId with both parts non-empty.`);
+  }
   return { modelRef, provider: modelRef.slice(0, slash), model: modelRef.slice(slash + 1) };
 }
 

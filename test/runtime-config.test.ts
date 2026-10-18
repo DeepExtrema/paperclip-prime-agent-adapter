@@ -53,3 +53,12 @@ describe("resolvePrimeRuntimeConfig mapping (INTERFACES §2)", () => {
     });
   });
 });
+
+describe("resolvePrimeRuntimeConfig model (INTERFACES §2)", () => {
+  it.each([[undefined], [""], ["   "], [42]])("requires model, refusing %j", (model) => {
+    expect(configErrorCode({ model })).toBe("prime_model_required");
+  });
+  it.each([["claude-haiku-4-5"], ["/claude-haiku-4-5"], ["anthropic/"]])("refuses model %j without provider/modelId", (model) => {
+    expect(configErrorCode({ model })).toBe("prime_model_invalid");
+  });
+});
