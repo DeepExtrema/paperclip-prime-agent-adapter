@@ -5,6 +5,7 @@ import type { IsPrimeUnknownSessionError, ParsedPrimeOutput, ParsePrimeJsonl } f
 type JsonObject = Record<string, unknown>;
 
 const PROVIDER_FAILURE_FALLBACK = "Prime provider request failed.";
+const RETRY_EXHAUSTED_FALLBACK = "Prime exhausted automatic retries without producing a response.";
 
 function asObject(value: unknown): JsonObject | null {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as JsonObject) : null;
@@ -143,6 +144,9 @@ export const parsePrimeJsonl: ParsePrimeJsonl = (stdout) => {
         if (message) addError(result, message);
         break;
       }
+      case "auto_retry_end":
+        if (event.success !== true) addError(result, asText(event.finalError).trim() || RETRY_EXHAUSTED_FALLBACK);
+        break;
       default:
         break;
     }

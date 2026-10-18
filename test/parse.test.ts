@@ -224,3 +224,18 @@ describe("parsePrimeJsonl: error events", () => {
     expect(parsePrimeJsonl(stdout).errors).toEqual(["Connection to model provider lost"]);
   });
 });
+
+describe("parsePrimeJsonl: auto_retry_end", () => {
+  it("adds finalError when the retries failed", () => {
+    const stdout = jsonl({ type: "auto_retry_end", success: false, attempt: 3, finalError: "API error (429): RESOURCE_EXHAUSTED" });
+    expect(parsePrimeJsonl(stdout).errors).toEqual(["API error (429): RESOURCE_EXHAUSTED"]);
+  });
+  it("uses the fallback text when finalError is missing", () => {
+    const stdout = jsonl({ type: "auto_retry_end", attempt: 3 });
+    expect(parsePrimeJsonl(stdout).errors).toEqual(["Prime exhausted automatic retries without producing a response."]);
+  });
+  it("adds nothing when the retry succeeded", () => {
+    const stdout = jsonl({ type: "auto_retry_end", success: true, attempt: 2 });
+    expect(parsePrimeJsonl(stdout).errors).toEqual([]);
+  });
+});
