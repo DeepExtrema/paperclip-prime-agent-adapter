@@ -1,6 +1,6 @@
 # Credentials
 
-Each agent's Prime dir gets its own `auth.json`. The server's ambient provider keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and the rest of `PRIME_PROVIDER_CREDENTIAL_ENV_KEYS` in `src/types.ts`) are removed from the child environment. Keys set in the agent's `env` are kept.
+Each agent's Prime dir gets its own `auth.json`. The inherited server environment uses the allowlist in [configuration](configuration.md#environment) (INTERFACES §16 A22). All other inherited server variables, including provider keys such as `ANTHROPIC_API_KEY` and `OPENAI_API_KEY`, are removed. Provider keys for `api_key` mode come from config `env`, applied on top of the allowlisted base with the Paperclip run environment and adapter keys.
 
 ## host_auth (default)
 

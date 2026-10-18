@@ -64,7 +64,9 @@ Failed, cancelled, timed-out and uncertain runs never replace the saved session.
 
 ## Environment
 
-The base is `sanitizeInheritedPaperclipEnv(process.env)` (INTERFACES §4 and §16 A8, A17). Inherited Paperclip server secrets such as `PAPERCLIP_AGENT_JWT_SECRET` never reach Prime. Stripped keys are passed as explicit `undefined`. Inherited keys with prefixes `PRIME_AGENT_`, `RLM_`, `PI_` and inherited provider keys in `PRIME_PROVIDER_CREDENTIAL_ENV_KEYS` (`src/types.ts`) are dropped. From config/Paperclip env, only `PRIME_AGENT_INTERNAL_*`, `RLM_*`, `PI_*` and adapter-owned keys are dropped. Then `PRIME_AGENT_CODING_AGENT_DIR=<agentDir>` and `PRIME_AGENT_TELEMETRY=0` are set.
+The base is `sanitizeInheritedPaperclipEnv(process.env)` (INTERFACES §4 and §16 A17, A22). From the server environment, only these keys pass: `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LC_*`, `TZ`, `TERM`, `TMPDIR`, `XDG_*`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `NODE_EXTRA_CA_CERTS`, `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` (and their lowercase forms), `PAPERCLIP_RUNTIME_API_URL`, `PAPERCLIP_LISTEN_HOST`, `PAPERCLIP_LISTEN_PORT`. Everything else, provider keys included, is dropped and listed by name in the run log. Inherited Paperclip server secrets such as `PAPERCLIP_AGENT_JWT_SECRET` never reach Prime. Stripped keys stay explicit `undefined` so the spawn helper cannot restore them. Set anything else Prime needs in config `env`.
+
+The Paperclip run environment and config `env` are applied on top of that base, except `PRIME_AGENT_INTERNAL_*`, `RLM_*`, `PI_*` and adapter-owned keys are stripped. The adapter sets `PRIME_AGENT_CODING_AGENT_DIR=<agentDir>` and `PRIME_AGENT_TELEMETRY=0`.
 
 Paperclip gives the agent `PAPERCLIP_AGENT_ID`, `PAPERCLIP_COMPANY_ID`, `PAPERCLIP_API_URL`, `PAPERCLIP_RUN_ID`, `PAPERCLIP_API_KEY` and, when present, `PAPERCLIP_TASK_ID`, `PAPERCLIP_WAKE_REASON`, `PAPERCLIP_WAKE_COMMENT_ID`, `PAPERCLIP_APPROVAL_ID`, `PAPERCLIP_APPROVAL_STATUS`, `PAPERCLIP_LINKED_ISSUE_IDS`.
 
