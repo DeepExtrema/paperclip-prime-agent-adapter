@@ -63,3 +63,50 @@ describe("skill snapshot (INTERFACES §9)", () => {
     expect(await fs.readdir(base, { recursive: true })).toEqual(before);
   });
 });
+
+
+describe("skill staging (INTERFACES §9)", () => {
+  it("symlinks each desired, present skill into one temp dir and returns one --skill dir per skill", async () => {
+    const staged = await stagePrimeSkills(skillConfig(["lint", "gone", "acme/tools/absent"]));
+    const [root] = await fs.readdir(tmp);
+    expect(root).toMatch(/^paperclip-prime-skills-/);
+    const stagedRoot = path.join(tmp, root!);
+    expect(staged.skillDirs).toEqual([path.join(stagedRoot, "paperclip"), path.join(stagedRoot, "lint")]);
+    expect(staged.missing).toEqual(["gone", "acme/tools/absent"]);
+    expect(await fs.readlink(path.join(stagedRoot, "lint"))).toBe(path.join(sources, "lint"));
+    expect(await fs.readFile(path.join(stagedRoot, "lint", "SKILL.md"), "utf8")).toBe("# lint\n");
+    expect((await fs.readdir(stagedRoot)).sort()).toEqual(["lint", "paperclip"]);
+    await staged.cleanup();
+  });
+  it("cleanup removes the temp dir, keeps the skill sources and never throws", async () => {
+    const staged = await stagePrimeSkills(skillConfig(["lint"]));
+    await staged.cleanup();
+    await staged.cleanup();
+    expect(await fs.readdir(tmp)).toEqual([]);
+    expect(await fs.readFile(path.join(sources, "lint", "SKILL.md"), "utf8")).toBe("# lint\n");
+  });
+  it("reports a runtime name that is not a single path segment as missing and never links it (INTERFACES §16 A10)", async () => {
+    const escape = { key: "acme/tools/escape", runtimeName: "../escape", source: path.join(sources, "lint") };
+    const staged = await stagePrimeSkills(skillConfig(["acme/tools/escape"], [escape]));
+    expect(staged.skillDirs.map((dir) => path.basename(dir))).toEqual(["paperclip"]);
+    expect(staged.missing).toEqual(["../escape (unsafe runtime name: not a single path segment)"]);
+    await expect(fs.lstat(path.join(tmp, "escape"))).rejects.toMatchObject({ code: "ENOENT" });
+    await staged.cleanup();
+    expect(await fs.readdir(tmp)).toEqual([]);
+  });
+  it("stages only the operational skill when nothing else is desired", async () => {
+    const staged = await stagePrimeSkills(skillConfig([]));
+    expect(staged.skillDirs.map((dir) => path.basename(dir))).toEqual(["paperclip"]);
+    expect(staged.missing).toEqual([]);
+    await staged.cleanup();
+  });
+});
+
+describe("failed skill staging (INTERFACES §9, R-27)", () => {
+  it("removes the temp dir and rethrows the original symlink error", async () => {
+    const duplicate = { key: "acme/other/lint", runtimeName: "lint", source: path.join(sources, "paperclip") };
+    const error = await stagePrimeSkills(skillConfig(["acme/tools/lint", "acme/other/lint"], [duplicate])).catch((err: unknown) => err);
+    expect(error).toMatchObject({ code: "EEXIST", syscall: "symlink" });
+    expect(await fs.readdir(tmp)).toEqual([]);
+  });
+});
