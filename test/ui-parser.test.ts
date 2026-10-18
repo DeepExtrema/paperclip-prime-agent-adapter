@@ -29,3 +29,11 @@ describe("session event", () => {
     expect(parseStdoutLine(line("run2", 1), TS)).toEqual([{ kind: "init", ts: TS, model: "", sessionId: "01a14c2a-5965-7269-8920-97d0da73b791" }]);
   });
 });
+
+describe("message_end: user and hidden roles", () => {
+  it("maps a user message to user with its text", () => {
+    const text = "Remember the code word PELICAN. Reply with exactly OK.";
+    expect(parseStdoutLine(line("run2", 7), TS)).toEqual([{ kind: "user", ts: TS, text }]);
+  });
+  it("returns no entries for custom (harness_digest) messages", () => expect(parseStdoutLine(line("run2", 5), TS)).toEqual([]));
+});

@@ -44,6 +44,14 @@ function errorText(message: Record<string, unknown>): string {
 function parseEvent(state: ParserState, event: Record<string, unknown>, raw: string, ts: string): UiTranscriptEntry[] {
   const type = asString(event.type);
   if (type === "session") return [{ kind: "init", ts, model: state.model, sessionId: asString(event.id) }];
+  if (type === "message_end") {
+    const message = asRecord(event.message);
+    if (message?.role === "user") {
+      const text = joinItems(message.content, "text", "text");
+      return text ? [{ kind: "user", ts, text }] : [];
+    }
+    return [];
+  }
   return [{ kind: "stdout", ts, text: raw }]; // unknown event type
 }
 
