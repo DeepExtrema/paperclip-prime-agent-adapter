@@ -238,3 +238,43 @@ describe("testEnvironment: version (INTERFACES.md §8, §10)", () => {
     expect(check(result, "prime_cli_version_unreadable")).toEqual({ code: "prime_cli_version_unreadable", level: "error", message, detail: command });
   });
 });
+
+describe("testEnvironment: credential (INTERFACES.md §3, §10)", () => {
+  it("seeds the ephemeral dir with the configured credential and reports host auth", async () => {
+    const result = await testEnvironment(ctx());
+    const plan = expect.objectContaining({ kind: "ephemeral", agentDir: ephemeralDirs[0] });
+    expect(mocks.seedPrimeAgentDir).toHaveBeenCalledWith(plan, { provider: "anthropic", env: {} });
+    const message = "Host Prime auth file is present and safe (billing: subscription).";
+    expect(check(result, "prime_auth_host_linked")).toEqual({ code: "prime_auth_host_linked", level: "info", message });
+  });
+
+  it("reports an api_key credential without showing the key", async () => {
+    const secret = "sk-wp5-secret-value";
+    const credential = { mode: "api_key", provider: "anthropic", apiKeyEnvVar: "ANTHROPIC_API_KEY" } as const;
+    mocks.resolvePrimeRuntimeConfig.mockImplementation(() => runtime({ credential, env: { ANTHROPIC_API_KEY: secret } }));
+    mocks.seedPrimeAgentDir.mockImplementation(async (plan: PrimeAgentDirPlan) => ({ plan, auth: "api_key_file", billingType: "api", notes: [] }));
+    const result = await testEnvironment(ctx());
+    expect(mocks.seedPrimeAgentDir).toHaveBeenCalledWith(expect.anything(), { provider: "anthropic", env: { ANTHROPIC_API_KEY: secret } });
+    const message = "API key from env var ANTHROPIC_API_KEY is set (value not shown).";
+    expect(check(result, "prime_auth_api_key")).toEqual({ code: "prime_auth_api_key", level: "info", message });
+    expect(JSON.stringify(result)).not.toContain(secret);
+  });
+
+  it.each([
+    ["prime_host_auth_missing", "prime_auth_missing"], ["prime_api_key_missing", "prime_auth_missing"],
+    ["prime_host_auth_unsafe", "prime_auth_unsafe"], ["prime_auth_file_unsafe", "prime_auth_unsafe"],
+    ["prime_agent_dir_unsafe", "prime_auth_unsafe"],
+  ] as const)("maps PrimeCredentialError %s to check %s", async (errorCode, checkCode) => {
+    mocks.seedPrimeAgentDir.mockRejectedValue(new PrimeCredentialError(errorCode, `credential problem: ${errorCode}`));
+    const result = await testEnvironment(ctx());
+    expect(result.status).toBe("fail");
+    expect(check(result, checkCode)).toEqual({ code: checkCode, level: "error", message: `credential problem: ${errorCode}` });
+    expect(cleanups[0]).toHaveBeenCalledTimes(1);
+  });
+
+  it("still checks the credential when the CLI is missing", async () => {
+    mocks.resolvePrimeRuntimeConfig.mockImplementation(() => runtime({ command: path.join(root, "bin", "nope") }));
+    const result = await testEnvironment(ctx());
+    expect(codes(result)).toEqual(["prime_cwd_valid", "prime_cli_missing", "prime_auth_host_linked"]);
+  });
+});

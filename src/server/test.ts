@@ -40,6 +40,11 @@ function configCheckCode(err: unknown): PrimeCheckCode {
   return "prime_config_invalid";
 }
 
+function credentialCheckCode(err: unknown): PrimeCheckCode {
+  const missing = err instanceof PrimeCredentialError && (err.code === "prime_host_auth_missing" || err.code === "prime_api_key_missing");
+  return missing ? "prime_auth_missing" : "prime_auth_unsafe";
+}
+
 // [wp5:helpers]
 
 export async function testEnvironment(ctx: AdapterEnvironmentTestContext): Promise<AdapterEnvironmentTestResult> {
@@ -112,6 +117,21 @@ export async function testEnvironment(ctx: AdapterEnvironmentTestContext): Promi
         const missing = err instanceof PrimeCliError && err.code === "prime_cli_missing";
         checks.push({ code: missing ? "prime_cli_missing" : "prime_cli_version_unreadable", level: "error", message: errorMessage(err), detail: command });
       }
+    }
+
+    let credentialReady = false;
+    try {
+      const seeded = await seedPrimeAgentDir(ephemeral.plan, { provider: runtime.provider, env: runtime.env });
+      if (runtime.credential.mode === "api_key") {
+        const message = `API key from env var ${runtime.credential.apiKeyEnvVar} is set (value not shown).`;
+        checks.push({ code: "prime_auth_api_key", level: "info", message });
+      } else {
+        const message = `Host Prime auth file is present and safe (billing: ${seeded.billingType}).`;
+        checks.push({ code: "prime_auth_host_linked", level: "info", message });
+      }
+      credentialReady = true;
+    } catch (err) {
+      checks.push({ code: credentialCheckCode(err), level: "error", message: errorMessage(err) });
     }
 
     // [wp5:next-step]
