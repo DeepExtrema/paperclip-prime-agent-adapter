@@ -133,6 +133,37 @@ async function linkHostAuth(authFile: string, hostAuthFile: string): Promise<voi
   await replaceAuthFile(authFile, (temp) => fs.symlink(hostAuthFile, temp));
 }
 
+function isPrivateRegularFile(stat: { isFile(): boolean; uid: number; mode: number }): boolean {
+  return stat.isFile() && stat.uid === process.getuid?.() && (stat.mode & 0o077) === 0;
+}
+
+async function assertHostAuthFile(hostAuthFile: string): Promise<void> {
+  let stat;
+  try {
+    stat = await fs.stat(hostAuthFile);
+  } catch (err) {
+    const hint = "Log in with prime-agent (/login) on the host, or set credentialMode to api_key.";
+    throw new PrimeCredentialError("prime_host_auth_missing", `Host Prime auth file not found: ${hostAuthFile}. ${hint}`, { cause: err });
+  }
+  if (!isPrivateRegularFile(stat)) {
+    const message = `Host Prime auth file ${hostAuthFile} must be a regular file owned by this user with mode 0600.`;
+    throw new PrimeCredentialError("prime_host_auth_unsafe", message);
+  }
+}
+
+/** Reads only `<provider>.type`; no other field of the host file is logged or returned. */
+async function readHostBillingType(hostAuthFile: string, provider: string): Promise<SeededPrimeAgentDir["billingType"]> {
+  if (provider === "") return "unknown";
+  try {
+    const type = parseObject(parseObject(JSON.parse(await fs.readFile(hostAuthFile, "utf8")))[provider]).type;
+    if (type === "oauth") return "subscription";
+    if (type === "api_key") return "api";
+    return "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
 export const seedPrimeAgentDir: SeedPrimeAgentDir = async (plan, input) => {
   await ensurePrivateDir(plan.agentDir);
   await ensurePrivateDir(plan.sessionDir);
@@ -140,9 +171,11 @@ export const seedPrimeAgentDir: SeedPrimeAgentDir = async (plan, input) => {
   const notes = [`Prime agent dir: ${plan.agentDir} (${plan.kind}).`];
   const credential = plan.credential;
   if (credential.mode === "host_auth") {
+    await assertHostAuthFile(credential.hostAuthFile);
     await linkHostAuth(authFile, credential.hostAuthFile);
     notes.push(`auth.json -> ${credential.hostAuthFile} (host Prime credential).`);
-    return { plan, auth: "host_auth_symlink", billingType: "unknown", notes };
+    const billingType = await readHostBillingType(credential.hostAuthFile, input.provider);
+    return { plan, auth: "host_auth_symlink", billingType, notes };
   }
   return notImplemented("WP1", "seedPrimeAgentDir api_key");
 };

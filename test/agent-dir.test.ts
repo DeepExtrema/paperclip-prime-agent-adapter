@@ -96,3 +96,40 @@ describe("seedPrimeAgentDir host_auth link (INTERFACES §3 steps 1-2)", () => {
     await cleanup();
   });
 });
+
+describe("seedPrimeAgentDir host_auth billing (INTERFACES §3 step 2)", () => {
+  it.each([
+    ["an oauth entry", { anthropic: { type: "oauth", refresh: "secret-value" } }, "anthropic", "subscription"],
+    ["an api_key entry", { anthropic: { type: "api_key", key: "secret-value" } }, "anthropic", "api"],
+    ["another type", { anthropic: { type: "bearer", token: "secret-value" } }, "anthropic", "unknown"],
+    ["no entry for the provider", { "openai-codex": { type: "oauth", refresh: "secret-value" } }, "anthropic", "unknown"],
+    ["an empty provider", { anthropic: { type: "oauth", refresh: "secret-value" } }, "", "unknown"],
+    ["invalid JSON", "secret-value {", "anthropic", "unknown"],
+  ])("classifies %s", async (_name, content, provider, billingType) => {
+    await writeHostAuth(content);
+    const seeded = await seedPrimeAgentDir(agentPlan(), { provider, env: {} });
+    expect(seeded.billingType).toBe(billingType);
+    expect(JSON.stringify(seeded)).not.toContain("secret-value");
+  });
+});
+
+describe("seedPrimeAgentDir host_auth refusals (INTERFACES §3 step 2)", () => {
+  it("refuses a missing host auth file and leaves auth.json absent", async () => {
+    await fs.rm(hostAuthFile);
+    expect(await seedErrorCode(agentPlan())).toBe("prime_host_auth_missing");
+    expect(await exists(path.join(agentPlan().agentDir, "auth.json"))).toBe(false);
+  });
+  it("refuses a host auth path that is a dangling link", async () => {
+    const link = path.join(root, "host-link.json");
+    await fs.symlink(path.join(root, "missing.json"), link);
+    expect(await seedErrorCode(agentPlan({ mode: "host_auth", hostAuthFile: link }))).toBe("prime_host_auth_missing");
+  });
+  it("refuses a host auth file readable by group or others", async () => {
+    await fs.chmod(hostAuthFile, 0o644);
+    expect(await seedErrorCode(agentPlan())).toBe("prime_host_auth_unsafe");
+  });
+  it("refuses a host auth path that is a directory", async () => {
+    await fs.mkdir(path.join(root, "auth-dir"), { mode: 0o700 });
+    expect(await seedErrorCode(agentPlan({ mode: "host_auth", hostAuthFile: path.join(root, "auth-dir") }))).toBe("prime_host_auth_unsafe");
+  });
+});
