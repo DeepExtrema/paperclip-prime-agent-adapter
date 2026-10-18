@@ -184,3 +184,10 @@ describe("execute: failed runs (INTERFACES §11.7)", () => {
     expect(result).not.toHaveProperty("sessionParams");
   });
 });
+describe("execute: uncertain runs (INTERFACES §11.7, L8)", () => {
+  it("maps a run without agent_end to prime_run_uncertain, never success, and keeps the session", async () => {
+    const { result } = await run({ env: { FAKE_PRIME_MODE: "drop_agent_end" } });
+    expect(result).toMatchObject({ exitCode: 1, timedOut: false, errorCode: "prime_run_uncertain", clearSession: false });
+    expect(result).not.toHaveProperty("sessionParams");
+  });
+});

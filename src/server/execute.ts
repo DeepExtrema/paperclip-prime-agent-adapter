@@ -160,6 +160,12 @@ function mapResult(attempt: Attempt, prep: PreparedRun, clearSession: boolean): 
     clearSession,
   };
   const failedExitCode = proc.exitCode !== null && proc.exitCode !== 0 ? proc.exitCode : 1;
+  if (!parsed.sawAgentEnd) {
+    const how = `exit ${proc.exitCode ?? "none"}, signal ${proc.signal ?? "none"}`;
+    const stderrLine = firstNonEmptyLine(proc.stderr);
+    const message = `prime-agent ended without an agent_end event (${how}); the run outcome is uncertain.${stderrLine ? ` stderr: ${stderrLine}` : ""}`;
+    return { ...base, exitCode: failedExitCode, errorCode: "prime_run_uncertain", errorMessage: message };
+  }
   if (parsed.errors.length > 0 || proc.exitCode !== 0) {
     const message = parsed.errors[0] ?? (firstNonEmptyLine(proc.stderr) || `prime-agent exited with code ${proc.exitCode}`);
     return { ...base, exitCode: failedExitCode, errorCode: "prime_run_failed", errorMessage: message };
