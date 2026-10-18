@@ -96,6 +96,24 @@ export async function testEnvironment(ctx: AdapterEnvironmentTestContext): Promi
       checks.push({ code: "prime_cli_missing", level: "error", message: errorMessage(err), detail: command });
     }
 
+    let versionSupported = false;
+    if (cliFound) {
+      try {
+        const version = await readPrimeVersion({ command, env, cwd });
+        versionSupported = isSupportedPrimeVersion(version);
+        if (versionSupported) {
+          checks.push({ code: "prime_cli_version", level: "info", message: `prime-agent ${version}` });
+        } else {
+          const { min, maxExclusive } = PRIME_SUPPORTED_VERSION_RANGE;
+          const message = `prime-agent ${version} is not supported; supported range is >= ${min} and < ${maxExclusive}.`;
+          checks.push({ code: "prime_cli_version_unsupported", level: "error", message });
+        }
+      } catch (err) {
+        const missing = err instanceof PrimeCliError && err.code === "prime_cli_missing";
+        checks.push({ code: missing ? "prime_cli_missing" : "prime_cli_version_unreadable", level: "error", message: errorMessage(err), detail: command });
+      }
+    }
+
     // [wp5:next-step]
     return finish();
   } finally {

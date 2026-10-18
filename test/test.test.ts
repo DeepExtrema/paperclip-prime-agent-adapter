@@ -216,3 +216,25 @@ describe("testEnvironment: CLI (INTERFACES.md §10)", () => {
     expect(result.checks.at(-1)).toEqual({ code: "prime_agent_dir_unsafe", level: "error", message: "EACCES: mkdtemp failed" });
   });
 });
+
+describe("testEnvironment: version (INTERFACES.md §8, §10)", () => {
+  it("reports a supported version", async () => {
+    const result = await testEnvironment(ctx());
+    expect(check(result, "prime_cli_version")).toEqual({ code: "prime_cli_version", level: "info", message: "prime-agent 0.10.0" });
+  });
+
+  it("fails on an unsupported version", async () => {
+    await writeFakePrime("0.11.0");
+    const result = await testEnvironment(ctx());
+    expect(result.status).toBe("fail");
+    const message = "prime-agent 0.11.0 is not supported; supported range is >= 0.10.0 and < 0.11.0.";
+    expect(check(result, "prime_cli_version_unsupported")).toEqual({ code: "prime_cli_version_unsupported", level: "error", message });
+  });
+
+  it("fails on unreadable version output", async () => {
+    const command = await writeFakePrime("garbage");
+    const result = await testEnvironment(ctx());
+    const message = `"${command} --version" printed "garbage", not a x.y.z version.`;
+    expect(check(result, "prime_cli_version_unreadable")).toEqual({ code: "prime_cli_version_unreadable", level: "error", message, detail: command });
+  });
+});
