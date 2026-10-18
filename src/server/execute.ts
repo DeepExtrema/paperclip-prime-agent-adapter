@@ -186,6 +186,11 @@ async function runPrime(ctx: AdapterExecutionContext, prep: PreparedRun): Promis
   }
   const resumeSessionFile = decision.resume ? decision.sessionFile : null;
   const first = await runAttempt(ctx, prep, system, notes, resumeSessionFile);
+  const firstFailed = !first.proc.timedOut && (first.proc.exitCode !== 0 || first.parsed.errors.length > 0);
+  if (saved && resumeSessionFile !== null && firstFailed && isPrimeUnknownSessionError(first.proc.stdout, first.proc.stderr)) {
+    await ctx.onLog("stdout", `[paperclip] Prime session "${saved.sessionId}" is unavailable; retrying with a fresh session.\n`);
+    return mapResult(await runAttempt(ctx, prep, system, notes, null), prep, true);
+  }
   return mapResult(first, prep, false);
 }
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
