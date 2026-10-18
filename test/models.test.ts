@@ -14,7 +14,10 @@ vi.mock("@paperclipai/adapter-utils/server-utils", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@paperclipai/adapter-utils/server-utils")>();
   return { ...actual, runChildProcess: vi.fn(actual.runChildProcess) };
 });
-vi.mock("../src/server/runtime-config.js", () => ({ resolvePrimeRuntimeConfig: vi.fn(), seedPrimeAgentDir: vi.fn(), createEphemeralPrimeAgentDir: vi.fn(), buildPrimeChildEnv: vi.fn() }));
+vi.mock("../src/server/runtime-config.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/server/runtime-config.js")>();
+  return { ...actual, resolvePrimeRuntimeConfig: vi.fn(), seedPrimeAgentDir: vi.fn(), createEphemeralPrimeAgentDir: vi.fn(), buildPrimeChildEnv: vi.fn() };
+});
 
 const fixturePath = (name: string) => fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url));
 const fixture = (name: string) => readFileSync(fixturePath(name), "utf8");
@@ -199,6 +202,27 @@ describe("adapter model listing (INTERFACES §8)", () => {
     expect(buildPrimeChildEnv).toHaveBeenCalledWith(process.env, plans[0], {});
     expect(runChildProcess).toHaveBeenCalledWith(expect.any(String), "prime-agent", ["model", "list"], expect.objectContaining({ cwd: plans[0]?.agentDir }));
     expect(cleanups).toBe(1);
+  });
+  it.each([
+    ["list", models.listPrimeModelsForAdapter],
+    ["refresh", models.refreshPrimeModelsForAdapter],
+  ] as const)("%s finds the user-local command when the server PATH lacks prime-agent", async (_name, listModels) => {
+    const actual = await vi.importActual<typeof import("../src/server/runtime-config.js")>("../src/server/runtime-config.js");
+    vi.mocked(createEphemeralPrimeAgentDir).mockImplementation(actual.createEphemeralPrimeAgentDir);
+    vi.mocked(seedPrimeAgentDir).mockImplementation(actual.seedPrimeAgentDir);
+    vi.mocked(buildPrimeChildEnv).mockImplementation(actual.buildPrimeChildEnv);
+    vi.stubEnv("PATH", "/usr/bin:/bin");
+    vi.stubEnv("PAPERCLIP_HOME", path.join(home, ".paperclip"));
+    await fs.mkdir(path.join(home, ".prime", "agent"), { recursive: true });
+    await fs.writeFile(path.join(home, ".prime", "agent", "auth.json"), "{}", { mode: 0o600 });
+    const bin = path.join(home, ".local", "bin");
+    await fs.mkdir(bin, { recursive: true });
+    await fakeCommand(bin, "prime-agent", `[ "$1 $2" = "model list" ] || exit 9\ncat "${fixturePath("model-list.txt")}"`);
+    models.resetPrimeModelsCacheForTests();
+
+    const result = await listModels();
+    expect(result).toHaveLength(275);
+    expect(result[0]).toEqual({ id: "anthropic/claude-fable-5", label: "anthropic/claude-fable-5" });
   });
   it("serves list from a 60 s cache while refresh always runs model list again", async () => {
     const first = await models.listPrimeModelsForAdapter();

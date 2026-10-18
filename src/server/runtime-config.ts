@@ -15,6 +15,25 @@ import {
   type SeededPrimeAgentDir,
 } from "../types.js";
 
+/** Resolves the server-side model discovery command without changing execute's child-PATH lookup. */
+export async function resolvePrimeDefaultCommand(env: NodeJS.ProcessEnv = process.env): Promise<string> {
+  for (const entry of env.PATH?.split(path.delimiter) ?? []) {
+    try {
+      await fs.access(path.join(entry, PRIME_DEFAULT_COMMAND), fs.constants.X_OK);
+      return PRIME_DEFAULT_COMMAND;
+    } catch {
+      // Keep searching PATH before trying the user-local install.
+    }
+  }
+  const fallback = path.join(os.homedir(), ".local", "bin", PRIME_DEFAULT_COMMAND);
+  try {
+    await fs.access(fallback, fs.constants.X_OK);
+    return fallback;
+  } catch {
+    return PRIME_DEFAULT_COMMAND;
+  }
+}
+
 // §2 resolvePrimeRuntimeConfig
 const DEFAULT_GRACE_SEC = 20; // pi-local execute.ts:373
 const SAFE_PATH_SEGMENT = /^[A-Za-z0-9_-]+$/; // agent and company ids become agent dir path segments
@@ -92,6 +111,7 @@ export const resolvePrimeRuntimeConfig: ResolvePrimeRuntimeConfig = (config, age
   const extraArgs = asStringArray(config.extraArgs);
   const env = Object.entries(parseObject(config.env)).filter((entry): entry is [string, string] => typeof entry[1] === "string");
   return {
+    // Execute resolves against the child PATH; listModels uses resolvePrimeDefaultCommand for the server.
     command: trimmedText(config.command) ?? PRIME_DEFAULT_COMMAND,
     modelRef, provider, model, thinking, cwd,
     instructionsFilePath: trimmedText(config.instructionsFilePath),
