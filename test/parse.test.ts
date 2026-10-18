@@ -212,3 +212,15 @@ describe("parsePrimeJsonl: provider failures", () => {
     expect(parsePrimeJsonl(stdout).errors).toEqual(["first", "second"]);
   });
 });
+
+describe("parsePrimeJsonl: error events", () => {
+  it("adds the message of error events once and ignores empty ones", () => {
+    const stdout = jsonl(
+      { type: "error", message: "Connection to model provider lost" },
+      { type: "error", message: "  " },
+      { type: "error" },
+      { type: "error", message: "Connection to model provider lost" },
+    );
+    expect(parsePrimeJsonl(stdout).errors).toEqual(["Connection to model provider lost"]);
+  });
+});

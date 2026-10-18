@@ -138,6 +138,11 @@ export const parsePrimeJsonl: ParsePrimeJsonl = (stdout) => {
         }
         agentEndText = lastAssistantText(event.messages);
         break;
+      case "error": {
+        const message = asText(event.message).trim();
+        if (message) addError(result, message);
+        break;
+      }
       default:
         break;
     }
