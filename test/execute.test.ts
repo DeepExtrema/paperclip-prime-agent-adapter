@@ -244,3 +244,16 @@ describe("execute: preflight refusals (INTERFACES §11.2, §11.3)", () => {
     expect(calls()).toEqual([]);
   });
 });
+describe("execute: CLI checks before seeding and spawn (INTERFACES §11.3, §8, §16 A9)", () => {
+  it("refuses an unsupported prime-agent version before the agent dir is created", async () => {
+    const { result } = await run({ env: { FAKE_PRIME_VERSION: "0.11.0" } });
+    expect(result).toMatchObject({ errorCode: "prime_preflight_failed", errorMeta: { primeErrorCode: "prime_cli_version_unsupported" } });
+    expect(existsSync(agentDir())).toBe(false);
+    expect(runCalls()).toEqual([]);
+  });
+  it("refuses a model that prime-agent model list does not show", async () => {
+    const { result } = await run({ config: { model: "anthropic/claude-not-a-model" } });
+    expect(result).toMatchObject({ errorCode: "prime_preflight_failed", errorMeta: { primeErrorCode: "prime_model_unknown" } });
+    expect(calls().map((call) => call.argv.slice(0, 2))).toEqual([["--version"], ["model", "list"]]);
+  });
+});

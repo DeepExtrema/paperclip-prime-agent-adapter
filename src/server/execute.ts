@@ -88,7 +88,13 @@ async function prepareRun(ctx: AdapterExecutionContext, startedAtMs: number): Pr
   const runtime = resolvePrimeRuntimeConfig(ctx.config, ctx.agent, resolvePaperclipInstanceRootForAdapter());
   const { cwd, env: paperclipEnv } = await buildPaperclipRunEnv(ctx, runtime);
   const { env: childEnv } = buildPrimeChildEnv(process.env, runtime.agentDir, paperclipEnv);
+  const version = await readPrimeVersion({ command: runtime.command, env: childEnv, cwd });
+  if (!isSupportedPrimeVersion(version)) {
+    const { min, maxExclusive } = PRIME_SUPPORTED_VERSION_RANGE;
+    throw new PrimeCliError("prime_cli_version_unsupported", `prime-agent ${version} is not supported; supported range is >= ${min} and < ${maxExclusive}.`);
+  }
   const seeded = await seedPrimeAgentDir(runtime.agentDir, { provider: runtime.provider, env: paperclipEnv });
+  assertPrimeModelListed(runtime.modelRef, await listPrimeModels({ command: runtime.command, env: childEnv, cwd }));
   const skills = await stagePrimeSkills(ctx.config);
   const deadlineMs = runtime.timeoutSec > 0 ? startedAtMs + runtime.timeoutSec * 1000 : null;
   return { runtime, cwd, paperclipEnv, childEnv, seeded, skills, deadlineMs };
