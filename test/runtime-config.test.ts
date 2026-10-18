@@ -62,3 +62,23 @@ describe("resolvePrimeRuntimeConfig model (INTERFACES §2)", () => {
     expect(configErrorCode({ model })).toBe("prime_model_invalid");
   });
 });
+
+describe("resolvePrimeRuntimeConfig thinking (INTERFACES §2, §16 A6)", () => {
+  it.each([["turbo"], ["HIGH"], [3]])("refuses thinking %j", (thinking) => {
+    expect(configErrorCode({ model: "a/b", thinking })).toBe("prime_thinking_invalid");
+  });
+  it("accepts every PRIME_THINKING_LEVELS value and treats blank as unset", () => {
+    for (const thinking of [...PRIME_THINKING_LEVELS, " "]) {
+      const resolved = resolvePrimeRuntimeConfig({ model: "a/b", thinking }, AGENT, INSTANCE_ROOT);
+      expect(resolved.thinking).toBe(thinking === " " ? null : thinking);
+    }
+  });
+  it("reads thinkingEffort (host UI key) when thinking is unset; empty means Prime default", () => {
+    const thinkingOf = (config: Record<string, unknown>) => resolvePrimeRuntimeConfig({ model: "a/b", ...config }, AGENT, INSTANCE_ROOT).thinking;
+    expect(thinkingOf({ thinkingEffort: "low" })).toBe("low");
+    expect(thinkingOf({ thinking: "", thinkingEffort: "medium" })).toBe("medium");
+    expect(thinkingOf({ thinking: "high", thinkingEffort: "low" })).toBe("high");
+    expect(thinkingOf({ thinkingEffort: "" })).toBeNull();
+    expect(configErrorCode({ model: "a/b", thinkingEffort: "turbo" })).toBe("prime_thinking_invalid");
+  });
+});

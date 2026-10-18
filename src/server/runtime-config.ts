@@ -48,7 +48,12 @@ function splitModelRef(value: unknown): { modelRef: string; provider: string; mo
 }
 
 function parseThinking(value: unknown): PrimeThinkingLevel | null {
-  return trimmedText(value) as PrimeThinkingLevel | null;
+  if (isUnset(value)) return null;
+  const level = PRIME_THINKING_LEVELS.find((candidate) => candidate === trimmedText(value));
+  if (level === undefined) {
+    throw new PrimeConfigError("prime_thinking_invalid", `adapterConfig.thinking must be one of ${PRIME_THINKING_LEVELS.join(", ")}.`);
+  }
+  return level;
 }
 
 function parseCredential(config: Record<string, unknown>, provider: string): PrimeCredentialConfig {
@@ -61,7 +66,7 @@ function parseCredential(config: Record<string, unknown>, provider: string): Pri
 
 export const resolvePrimeRuntimeConfig: ResolvePrimeRuntimeConfig = (config, agent, instanceRoot) => {
   const { modelRef, provider, model } = splitModelRef(config.model);
-  const thinking = parseThinking(config.thinking);
+  const thinking = parseThinking(isUnset(config.thinking) ? config.thinkingEffort : config.thinking); // §16 A6
   const credential = parseCredential(config, provider);
   const cwd = absolutePath(config.cwd, "cwd");
   const agentDirRoot =
