@@ -50,3 +50,14 @@ describe("message_end: assistant", () => {
     ]);
   });
 });
+
+describe("message_end: thinking", () => {
+  it("emits thinking before the assistant text", () => {
+    const content = [{ type: "thinking", thinking: "Plan the reply." }, { type: "text", text: "Done." }];
+    const raw = JSON.stringify({ type: "message_end", message: { role: "assistant", content, stopReason: "stop" } });
+    expect(parseStdoutLine(raw, TS)).toEqual([
+      { kind: "thinking", ts: TS, text: "Plan the reply." },
+      { kind: "assistant", ts: TS, text: "Done." },
+    ]);
+  });
+});

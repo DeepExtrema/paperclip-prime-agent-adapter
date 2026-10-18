@@ -43,6 +43,8 @@ function errorText(message: Record<string, unknown>): string {
 
 function assistantEntries(state: ParserState, message: Record<string, unknown>, ts: string): UiTranscriptEntry[] {
   const entries: UiTranscriptEntry[] = [];
+  const thinking = joinItems(message.content, "thinking", "thinking");
+  if (thinking) entries.push({ kind: "thinking", ts, text: thinking });
   const text = joinItems(message.content, "text", "text");
   if (text) entries.push({ kind: "assistant", ts, text });
   for (const item of contentItems(message.content)) {
