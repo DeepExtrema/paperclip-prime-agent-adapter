@@ -67,3 +67,24 @@ describe("session header (INTERFACES §7)", () => {
     }
   });
 });
+
+
+describe("resume decision (INTERFACES §7)", () => {
+  const current = { cwd: params.cwd, provider: params.provider, model: params.model, agentDir: params.agentDir };
+  const header = { id: params.sessionId, cwd: params.cwd };
+  const decide = (input: Partial<Parameters<typeof decidePrimeResume>[0]>) => decidePrimeResume({ saved: params, current, header, ...input });
+  it("resumes when cwd, provider, model, agent dir and header all match", () => {
+    expect(decide({})).toEqual({ resume: true, sessionFile: params.sessionFile });
+    expect(decide({ current: { ...current, cwd: "/work/project/" }, header: { ...header, cwd: null } })).toEqual({ resume: true, sessionFile: params.sessionFile });
+  });
+  it("returns the first failing reason in the contract order", () => {
+    expect(decide({ saved: null, current: { ...current, cwd: "/elsewhere" } })).toEqual({ resume: false, reason: "no_saved_session" });
+    expect(decide({ current: { ...current, cwd: "/elsewhere", model: "claude-opus-5" } })).toEqual({ resume: false, reason: "cwd_mismatch" });
+    expect(decide({ current: { ...current, provider: "openai-codex", agentDir: "/other" } })).toEqual({ resume: false, reason: "model_mismatch" });
+    expect(decide({ current: { ...current, model: "claude-opus-5" } })).toEqual({ resume: false, reason: "model_mismatch" });
+    expect(decide({ current: { ...current, agentDir: "/agents/a2/prime-agent-home" }, header: null })).toEqual({ resume: false, reason: "agent_dir_mismatch" });
+    expect(decide({ header: null })).toEqual({ resume: false, reason: "session_file_missing" });
+    expect(decide({ header: { ...header, id: "other-session" } })).toEqual({ resume: false, reason: "session_header_mismatch" });
+    expect(decide({ header: { ...header, cwd: "/elsewhere" } })).toEqual({ resume: false, reason: "session_header_mismatch" });
+  });
+});

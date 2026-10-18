@@ -2,7 +2,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { AdapterSessionCodec } from "@paperclipai/adapter-utils";
-import { notImplemented } from "../errors.js";
 import type { DecidePrimeResume, PrimeSessionParams, ReadPrimeSessionHeader } from "../types.js";
 
 const SESSION_PARAM_KEYS = ["sessionId", "sessionFile", "cwd", "provider", "model", "agentDir"] as const;
@@ -41,4 +40,12 @@ export const readPrimeSessionHeader: ReadPrimeSessionHeader = async (sessionFile
   }
 };
 
-export const decidePrimeResume: DecidePrimeResume = () => notImplemented("WP4", "decidePrimeResume");
+export const decidePrimeResume: DecidePrimeResume = ({ saved, current, header }) => {
+  if (saved === null) return { resume: false, reason: "no_saved_session" };
+  if (path.resolve(saved.cwd) !== path.resolve(current.cwd)) return { resume: false, reason: "cwd_mismatch" };
+  if (saved.provider !== current.provider || saved.model !== current.model) return { resume: false, reason: "model_mismatch" };
+  if (path.resolve(saved.agentDir) !== path.resolve(current.agentDir)) return { resume: false, reason: "agent_dir_mismatch" };
+  if (header === null) return { resume: false, reason: "session_file_missing" };
+  if (header.id !== saved.sessionId || (header.cwd !== null && path.resolve(header.cwd) !== path.resolve(current.cwd))) return { resume: false, reason: "session_header_mismatch" };
+  return { resume: true, sessionFile: saved.sessionFile };
+};
