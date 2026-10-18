@@ -133,3 +133,23 @@ describe("whole runs", () => {
     expect(parseRun("run1").map((e) => e.kind)).toEqual(["init", "user", "stderr", "result"]);
   });
 });
+
+describe("parser state and robustness", () => {
+  it("createStdoutParser uses the last assistant model for init until reset", () => {
+    const parser = createStdoutParser();
+    parser.parseLine(line("run2", 12), TS);
+    expect(parser.parseLine(line("run3", 1), TS)).toMatchObject([{ kind: "init", model: "claude-haiku-4-5" }]);
+    parser.reset();
+    expect(parser.parseLine(line("run3", 1), TS)).toMatchObject([{ kind: "init", model: "" }]);
+    parseStdoutLine(line("run2", 12), TS);
+    expect(parseStdoutLine(line("run3", 1), TS)).toMatchObject([{ kind: "init", model: "" }]);
+  });
+  it("never throws on malformed events", () => {
+    const inputs = ['{"type":"message_end"}', '{"type":"message_end","message":{"role":"assistant","content":"plain"}}',
+      '{"type":"message_end","message":{"role":"assistant","content":[null,1,{"type":"toolCall"}]}}', '{"type":"tool_execution_end"}',
+      '{"type":"agent_end","messages":"x"}', '{"type":"agent_end","messages":[{"role":"assistant","usage":{"input":"3","cost":null}}]}',
+      '{"type":"session","id":7}', "null", "{"];
+    for (const input of inputs) expect(Array.isArray(parseStdoutLine(input, TS))).toBe(true);
+    expect(parseStdoutLine(inputs[1] ?? "", TS)).toEqual([{ kind: "assistant", ts: TS, text: "plain" }]);
+  });
+});
