@@ -64,3 +64,30 @@ describe("buildPrimeChildEnv server Paperclip env (§16 A17)", () => {
     expect([Object.hasOwn(env, "PAPERCLIP_AGENT_JWT_SECRET"), env.PAPERCLIP_RUNTIME_API_URL, env.PAPERCLIP_API_KEY]).toEqual([false, "http://127.0.0.1:3100", "run-jwt"]);
   });
 });
+
+describe("buildPrimeChildEnv base allowlist (§16 A22)", () => {
+  it("passes runtime settings, blanks server secrets and accepts operator provider keys", () => {
+    const allowed = {
+      PATH: "/usr/bin", HOME: "/home/op", USER: "op", LOGNAME: "op", SHELL: "/bin/bash", LANG: "en_US.UTF-8",
+      LC_ALL: "C", TZ: "UTC", TERM: "xterm", TMPDIR: "/tmp", XDG_CACHE_HOME: "/tmp/cache",
+      SSL_CERT_FILE: "/certs/ca.pem", SSL_CERT_DIR: "/certs", NODE_EXTRA_CA_CERTS: "/certs/node.pem",
+      HTTP_PROXY: "http://proxy:8080", HTTPS_PROXY: "http://proxy:8080", NO_PROXY: "localhost",
+      http_proxy: "http://proxy:8080", https_proxy: "http://proxy:8080", no_proxy: "localhost",
+      PAPERCLIP_RUNTIME_API_URL: "http://127.0.0.1:3100", PAPERCLIP_LISTEN_HOST: "127.0.0.1", PAPERCLIP_LISTEN_PORT: "3100",
+    };
+    const base = {
+      ...allowed, DATABASE_URL: "fixture-db", AWS_SECRET_ACCESS_KEY: "fixture-aws", GH_TOKEN: "fixture-gh",
+      BETTER_AUTH_SECRET: "fixture-auth", GOOGLE_API_KEY: "fixture-google", OPENAI_API_KEY: "fixture-host",
+    };
+    const configEnv = { OPENAI_API_KEY: "fixture-config" };
+    const { env, droppedKeys } = buildPrimeChildEnv(base, PLAN, { PAPERCLIP_RUN_ID: "run-1", ...configEnv });
+    expect(env).toStrictEqual({
+      ...allowed, DATABASE_URL: undefined, AWS_SECRET_ACCESS_KEY: undefined, GH_TOKEN: undefined,
+      BETTER_AUTH_SECRET: undefined, GOOGLE_API_KEY: undefined, OPENAI_API_KEY: "fixture-config",
+      PAPERCLIP_RUN_ID: "run-1", PRIME_AGENT_CODING_AGENT_DIR: AGENT_DIR, PRIME_AGENT_TELEMETRY: "0",
+    });
+    expect(droppedKeys).toEqual([
+      "AWS_SECRET_ACCESS_KEY", "BETTER_AUTH_SECRET", "DATABASE_URL", "GH_TOKEN", "GOOGLE_API_KEY", "OPENAI_API_KEY",
+    ]);
+  });
+});

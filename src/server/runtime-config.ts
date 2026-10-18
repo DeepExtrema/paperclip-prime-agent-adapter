@@ -9,8 +9,8 @@ import {
 } from "@paperclipai/adapter-utils/server-utils";
 import { PrimeConfigError, PrimeCredentialError } from "../errors.js";
 import {
-  PRIME_ADAPTER_OWNED_ENV_KEYS, PRIME_ALWAYS_STRIPPED_ENV_PREFIXES, PRIME_DEFAULT_COMMAND, PRIME_PROVIDER_CREDENTIAL_ENV_KEYS,
-  PRIME_STRIPPED_ENV_PREFIXES, PRIME_THINKING_LEVELS, type BuildPrimeChildEnv, type CreateEphemeralPrimeAgentDir,
+  PRIME_ADAPTER_OWNED_ENV_KEYS, PRIME_ALWAYS_STRIPPED_ENV_PREFIXES, PRIME_DEFAULT_COMMAND,
+  PRIME_THINKING_LEVELS, type BuildPrimeChildEnv, type CreateEphemeralPrimeAgentDir,
   type PrimeCredentialConfig, type PrimeThinkingLevel, type ResolvePrimeRuntimeConfig, type SeedPrimeAgentDir,
   type SeededPrimeAgentDir,
 } from "../types.js";
@@ -272,7 +272,12 @@ function hasPrefix(key: string, prefixes: readonly string[]): boolean {
   return prefixes.some((prefix) => key.startsWith(prefix));
 }
 
-const PROVIDER_KEYS: readonly string[] = PRIME_PROVIDER_CREDENTIAL_ENV_KEYS;
+const BASE_ENV_KEYS = new Set([
+  "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TZ", "TERM", "TMPDIR",
+  "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+  "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+  "PAPERCLIP_RUNTIME_API_URL", "PAPERCLIP_LISTEN_HOST", "PAPERCLIP_LISTEN_PORT",
+]);
 const OWNED_KEYS: readonly string[] = PRIME_ADAPTER_OWNED_ENV_KEYS;
 
 /** Stripped keys stay as explicit undefined: runChildProcess merges process.env first, then deletes undefined keys (§16 A8). */
@@ -281,7 +286,7 @@ export const buildPrimeChildEnv: BuildPrimeChildEnv = (base, plan, paperclipEnv)
   const env: Record<string, string | undefined> = {};
   for (const [key, value] of Object.entries(sanitizeInheritedPaperclipEnv(base))) { // §16 A17: no server PAPERCLIP_* secrets
     if (value === undefined) continue;
-    const strip = hasPrefix(key, PRIME_STRIPPED_ENV_PREFIXES) || PROVIDER_KEYS.includes(key);
+    const strip = !BASE_ENV_KEYS.has(key) && !hasPrefix(key, ["LC_", "XDG_"]); // §16 A22
     if (strip) dropped.add(key);
     env[key] = strip ? undefined : value;
   }
