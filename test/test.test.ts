@@ -110,3 +110,26 @@ describe("testEnvironment: execution target (INTERFACES.md §10)", () => {
     expect(result.adapterType).toBe("prime_agent_local");
   });
 });
+
+describe("testEnvironment: config (INTERFACES.md §10)", () => {
+  it.each([
+    ["prime_model_required", "prime_model_required"], ["prime_model_invalid", "prime_model_invalid"],
+    ["prime_thinking_invalid", "prime_thinking_invalid"], ["prime_credential_mode_invalid", "prime_config_invalid"],
+    ["prime_api_key_env_var_required", "prime_config_invalid"], ["prime_path_invalid", "prime_config_invalid"],
+  ] as const)("maps PrimeConfigError %s to check %s and stops", async (errorCode, checkCode) => {
+    mocks.resolvePrimeRuntimeConfig.mockImplementation(() => {
+      throw new PrimeConfigError(errorCode, `bad config: ${errorCode}`);
+    });
+    const result = await testEnvironment(ctx());
+    expect(result.status).toBe("fail");
+    expect(result.checks).toEqual([{ code: checkCode, level: "error", message: `bad config: ${errorCode}` }]);
+    expect(mocks.createEphemeralPrimeAgentDir).not.toHaveBeenCalled();
+  });
+
+  it("resolves the config with ctx.config, ctx.companyId and the instance root", async () => {
+    const config = { model: MODEL_REF, thinking: "low" };
+    await testEnvironment(ctx({ config }));
+    const agent = { id: "environment-test", companyId: "company-1" };
+    expect(mocks.resolvePrimeRuntimeConfig).toHaveBeenCalledWith(config, agent, expect.stringMatching(/instances/));
+  });
+});

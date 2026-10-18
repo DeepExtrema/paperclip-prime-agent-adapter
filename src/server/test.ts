@@ -34,6 +34,12 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+function configCheckCode(err: unknown): PrimeCheckCode {
+  const passThrough = ["prime_model_required", "prime_model_invalid", "prime_thinking_invalid"] as const;
+  if (err instanceof PrimeConfigError && (passThrough as readonly string[]).includes(err.code)) return err.code as PrimeCheckCode;
+  return "prime_config_invalid";
+}
+
 // [wp5:helpers]
 
 export async function testEnvironment(ctx: AdapterEnvironmentTestContext): Promise<AdapterEnvironmentTestResult> {
@@ -48,6 +54,14 @@ export async function testEnvironment(ctx: AdapterEnvironmentTestContext): Promi
   const target = ctx.executionTarget ?? null;
   if (target !== null && target.kind !== "local") {
     checks.push({ code: "prime_config_invalid", level: "error", message: "remote execution targets are not supported in phase 1" });
+    return finish();
+  }
+
+  let runtime: PrimeRuntimeConfig;
+  try {
+    runtime = resolvePrimeRuntimeConfig(ctx.config, { id: ENVIRONMENT_TEST_AGENT_ID, companyId: ctx.companyId }, resolvePaperclipInstanceRootForAdapter());
+  } catch (err) {
+    checks.push({ code: configCheckCode(err), level: "error", message: errorMessage(err) });
     return finish();
   }
 
