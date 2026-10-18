@@ -170,3 +170,50 @@ describe("model check (INTERFACES §8)", () => {
     }
   });
 });
+
+
+describe("adapter model listing (INTERFACES §8)", () => {
+  let home: string;
+  let plans: PrimeAgentDirPlan[];
+  let cleanups: number;
+  beforeEach(async () => {
+    const dir = await makeScratch();
+    home = path.join(dir, "home");
+    vi.stubEnv("HOME", home);
+    await fakeCommand(dir, "prime-agent", `cat "${fixturePath("model-list.txt")}"`);
+    plans = [];
+    cleanups = 0;
+    vi.mocked(createEphemeralPrimeAgentDir).mockImplementation(async (credential) => {
+      const agentDir = await fs.mkdtemp(path.join(dir, "ephemeral-"));
+      plans.push({ kind: "ephemeral", agentDir, sessionDir: path.join(agentDir, "sessions"), credential });
+      return { plan: plans.at(-1)!, cleanup: async () => void (cleanups += 1) };
+    });
+    vi.mocked(seedPrimeAgentDir).mockImplementation(async (plan) => ({ plan, auth: "host_auth_symlink", billingType: "unknown", notes: [] }));
+    vi.mocked(buildPrimeChildEnv).mockImplementation((_base, plan) => ({ env: { PATH: `${dir}:/usr/bin:/bin`, PRIME_AGENT_CODING_AGENT_DIR: plan.agentDir }, droppedKeys: [] }));
+  });
+  afterEach(() => models.resetPrimeModelsCacheForTests());
+  it("lists the host credential's models through a seeded ephemeral dir and cleans it up", async () => {
+    expect(await models.listPrimeModelsForAdapter()).toHaveLength(275);
+    expect(createEphemeralPrimeAgentDir).toHaveBeenCalledWith({ mode: "host_auth", hostAuthFile: path.join(home, ".prime", "agent", "auth.json") });
+    expect(seedPrimeAgentDir).toHaveBeenCalledWith(plans[0], { provider: "", env: {} });
+    expect(buildPrimeChildEnv).toHaveBeenCalledWith(process.env, plans[0], {});
+    expect(runChildProcess).toHaveBeenCalledWith(expect.any(String), "prime-agent", ["model", "list"], expect.objectContaining({ cwd: plans[0]?.agentDir }));
+    expect(cleanups).toBe(1);
+  });
+  it("serves list from a 60 s cache while refresh always runs model list again", async () => {
+    const first = await models.listPrimeModelsForAdapter();
+    expect(await models.listPrimeModelsForAdapter()).toBe(first);
+    expect(createEphemeralPrimeAgentDir).toHaveBeenCalledTimes(1);
+    expect(await models.refreshPrimeModelsForAdapter()).toHaveLength(275);
+    expect(createEphemeralPrimeAgentDir).toHaveBeenCalledTimes(2);
+    expect(cleanups).toBe(2);
+  });
+  it("returns [] on any failure and still cleans up", async () => {
+    vi.mocked(seedPrimeAgentDir).mockRejectedValueOnce(new Error("prime_host_auth_missing"));
+    await expect(models.listPrimeModelsForAdapter()).resolves.toEqual([]);
+    expect(cleanups).toBe(1);
+    vi.mocked(createEphemeralPrimeAgentDir).mockRejectedValueOnce(new Error("mkdtemp failed"));
+    await expect(models.refreshPrimeModelsForAdapter()).resolves.toEqual([]);
+    expect(runChildProcess).not.toHaveBeenCalled();
+  });
+});

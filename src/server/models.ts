@@ -95,16 +95,36 @@ export const listPrimeModels: ListPrimeModels = async (input) => {
 /** Test helper: clears the model caches. */
 export function resetPrimeModelsCacheForTests(): void {
   discoveryCache.clear();
+  hostModelsCache = null;
+}
+
+let hostModelsCache: { expiresAt: number; models: AdapterModel[] } | null = null;
+
+async function loadHostModels(): Promise<AdapterModel[]> {
+  let ephemeral: EphemeralPrimeAgentDir | null = null;
+  try {
+    ephemeral = await createEphemeralPrimeAgentDir({ mode: "host_auth", hostAuthFile: path.join(os.homedir(), ".prime", "agent", "auth.json") });
+    await seedPrimeAgentDir(ephemeral.plan, { provider: "", env: {} });
+    const { env } = buildPrimeChildEnv(process.env, ephemeral.plan, {});
+    const models = await discoverPrimeModels({ command: PRIME_DEFAULT_COMMAND, env, cwd: ephemeral.plan.agentDir });
+    hostModelsCache = { expiresAt: Date.now() + MODELS_CACHE_TTL_MS, models };
+    return models;
+  } catch {
+    return [];
+  } finally {
+    await ephemeral?.cleanup();
+  }
 }
 
 /** ServerAdapterModule.listModels: host-credential ephemeral agent dir; [] on any failure. */
 export async function listPrimeModelsForAdapter(): Promise<AdapterModel[]> {
-  return notImplemented("WP4", "listPrimeModelsForAdapter");
+  if (hostModelsCache && hostModelsCache.expiresAt > Date.now()) return hostModelsCache.models;
+  return loadHostModels();
 }
 
 /** ServerAdapterModule.refreshModels: as listPrimeModelsForAdapter, bypassing the cache. */
 export async function refreshPrimeModelsForAdapter(): Promise<AdapterModel[]> {
-  return notImplemented("WP4", "refreshPrimeModelsForAdapter");
+  return loadHostModels();
 }
 
 /** Model check for execute and testEnvironment (INTERFACES §8). Throws PrimeCliError("prime_model_unknown"). */
