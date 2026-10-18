@@ -18,6 +18,11 @@ export async function refreshPrimeModelsForAdapter(): Promise<AdapterModel[]> {
   return notImplemented("WP4", "refreshPrimeModelsForAdapter");
 }
 
+/** A9: throws PrimeCliError("prime_model_unknown") when modelRef is not in models. */
+export function assertPrimeModelListed(_modelRef: string, _models: AdapterModel[]): void {
+  return notImplemented("WP4", "assertPrimeModelListed");
+}
+
 export const detectPrimeModel: DetectPrimeModel = async () => notImplemented("WP4", "detectPrimeModel");
 
 /** ServerAdapterModule.detectModel: detectPrimeModel(<os.homedir()>/.prime/agent). */
