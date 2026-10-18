@@ -165,3 +165,54 @@ describe("testEnvironment: cwd (INTERFACES.md §10, §16 A16)", () => {
     expect(mocks.createEphemeralPrimeAgentDir).not.toHaveBeenCalled();
   });
 });
+
+describe("testEnvironment: CLI (INTERFACES.md §10)", () => {
+  it("finds the CLI with the child env of a fresh ephemeral dir and cleans the dir up", async () => {
+    const result = await testEnvironment(ctx());
+    const message = `Prime CLI found: ${path.join(root, "bin", "prime-agent")}`;
+    expect(check(result, "prime_cli_found")).toEqual({ code: "prime_cli_found", level: "info", message });
+    expect(mocks.createEphemeralPrimeAgentDir).toHaveBeenCalledTimes(1);
+    expect(mocks.createEphemeralPrimeAgentDir).toHaveBeenCalledWith(runtime().credential);
+    const plan = expect.objectContaining({ kind: "ephemeral", agentDir: ephemeralDirs[0] });
+    expect(mocks.buildPrimeChildEnv).toHaveBeenCalledWith(process.env, plan, {});
+    expect(cleanups[0]).toHaveBeenCalledTimes(1);
+    await expect(stat(ephemeralDirs[0]!)).rejects.toThrow(/ENOENT/);
+  });
+
+  it("resolves a bare command name through the child env PATH", async () => {
+    mocks.resolvePrimeRuntimeConfig.mockImplementation(() => runtime({ command: "prime-agent" }));
+    mocks.buildPrimeChildEnv.mockImplementation((_base: NodeJS.ProcessEnv, plan: PrimeAgentDirPlan) => ({
+      env: { PATH: `${path.join(root, "bin")}:/usr/bin:/bin`, PRIME_AGENT_CODING_AGENT_DIR: plan.agentDir },
+      droppedKeys: [],
+    }));
+    const result = await testEnvironment(ctx());
+    expect(check(result, "prime_cli_found").message).toBe(`Prime CLI found: ${path.join(root, "bin", "prime-agent")}`);
+  });
+
+  it("reports prime_cli_missing and skips the version step", async () => {
+    const missing = path.join(root, "bin", "no-such-prime-agent");
+    mocks.resolvePrimeRuntimeConfig.mockImplementation(() => runtime({ command: missing }));
+    const result = await testEnvironment(ctx());
+    expect(result.status).toBe("fail");
+    const message = `Command is not executable: "${missing}" (resolved: "${missing}")`;
+    expect(check(result, "prime_cli_missing")).toEqual({ code: "prime_cli_missing", level: "error", message, detail: missing });
+    expect(codes(result).filter((code) => code.startsWith("prime_cli_version"))).toEqual([]);
+    expect(cleanups[0]).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns a failing check with the PrimeCredentialError code when the ephemeral dir cannot be created", async () => {
+    mocks.createEphemeralPrimeAgentDir.mockRejectedValueOnce(new PrimeCredentialError("prime_host_auth_unsafe", "host auth is unsafe"));
+    const result = await testEnvironment(ctx());
+    expect(result.status).toBe("fail");
+    expect(result.checks).toEqual([
+      { code: "prime_cwd_valid", level: "info", message: `Working directory is valid: ${workDir}` },
+      { code: "prime_host_auth_unsafe", level: "error", message: "host auth is unsafe" },
+    ]);
+  });
+
+  it("uses prime_agent_dir_unsafe for any other ephemeral-dir error", async () => {
+    mocks.createEphemeralPrimeAgentDir.mockRejectedValueOnce(new Error("EACCES: mkdtemp failed"));
+    const result = await testEnvironment(ctx());
+    expect(result.checks.at(-1)).toEqual({ code: "prime_agent_dir_unsafe", level: "error", message: "EACCES: mkdtemp failed" });
+  });
+});

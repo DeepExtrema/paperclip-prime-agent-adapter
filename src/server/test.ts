@@ -75,6 +75,30 @@ export async function testEnvironment(ctx: AdapterEnvironmentTestContext): Promi
     return finish();
   }
 
-  // [wp5:next-step]
-  return finish();
+  let ephemeral: EphemeralPrimeAgentDir;
+  try {
+    ephemeral = await createEphemeralPrimeAgentDir(runtime.credential);
+  } catch (err) {
+    const code = err instanceof PrimeCredentialError ? err.code : "prime_agent_dir_unsafe";
+    checks.push({ code, level: "error", message: errorMessage(err) });
+    return finish();
+  }
+  try {
+    const { env } = buildPrimeChildEnv(process.env, ephemeral.plan, runtime.env);
+    const command = runtime.command;
+
+    let cliFound = false;
+    try {
+      await ensureCommandResolvable(command, cwd, env);
+      checks.push({ code: "prime_cli_found", level: "info", message: `Prime CLI found: ${await resolveCommandForLogs(command, cwd, env)}` });
+      cliFound = true;
+    } catch (err) {
+      checks.push({ code: "prime_cli_missing", level: "error", message: errorMessage(err), detail: command });
+    }
+
+    // [wp5:next-step]
+    return finish();
+  } finally {
+    await ephemeral.cleanup();
+  }
 }
