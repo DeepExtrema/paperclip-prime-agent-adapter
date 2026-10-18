@@ -12,3 +12,33 @@ describe("parsePrimeStdoutLine", () => {
     for (const l of lines) expect(parsePrimeStdoutLine(l, TS)).toEqual(parseStdoutLine(l, TS));
   });
 });
+
+function makeValues(overrides: Partial<CreateConfigValues> = {}): CreateConfigValues {
+  return {
+    adapterType: "prime_agent_local", cwd: "", instructionsFilePath: "", promptTemplate: "", model: "", thinkingEffort: "",
+    chrome: false, dangerouslySkipPermissions: false, search: false, fastMode: false, dangerouslyBypassSandbox: false,
+    command: "", args: "", extraArgs: "", envVars: "", envBindings: {}, url: "", bootstrapPrompt: "",
+    maxTurnsPerRun: 1000, heartbeatEnabled: false, intervalSec: 300, ...overrides,
+  };
+}
+
+describe("buildPrimeLocalConfig", () => {
+  it("writes only the pi-local timeout defaults for an empty form", () => {
+    expect(buildPrimeLocalConfig(makeValues())).toEqual({ timeoutSec: 0, graceSec: 20 });
+  });
+  it("maps the standard form fields and splits argument strings", () => {
+    const config = buildPrimeLocalConfig(makeValues({
+      cwd: "/srv/work", instructionsFilePath: "/srv/work/AGENTS.md", model: "anthropic/claude-haiku-4-5", thinkingEffort: "low",
+      command: "prime-agent", extraArgs: " --no-skills  --verbose ", envVars: "FOO=bar",
+    }));
+    expect(config).toEqual({
+      cwd: "/srv/work", instructionsFilePath: "/srv/work/AGENTS.md", model: "anthropic/claude-haiku-4-5", thinking: "low",
+      timeoutSec: 0, graceSec: 20, env: { FOO: { type: "plain", value: "bar" } }, command: "prime-agent",
+      extraArgs: ["--no-skills", "--verbose"],
+    });
+  });
+  it("copies credentialMode and a trimmed apiKeyEnvVar from adapterSchemaValues", () => {
+    const values = makeValues({ adapterSchemaValues: { credentialMode: "api_key", apiKeyEnvVar: " ANTHROPIC_API_KEY " } });
+    expect(buildPrimeLocalConfig(values)).toEqual({ timeoutSec: 0, graceSec: 20, credentialMode: "api_key", apiKeyEnvVar: "ANTHROPIC_API_KEY" });
+  });
+});
