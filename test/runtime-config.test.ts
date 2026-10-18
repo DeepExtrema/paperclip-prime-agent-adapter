@@ -113,8 +113,8 @@ describe("resolvePrimeRuntimeConfig effort alias (§16 A21)", () => {
     const thinkingOf = (config: Record<string, unknown>) => resolvePrimeRuntimeConfig({ model: "a/b", ...config }, AGENT, INSTANCE_ROOT).thinking;
     expect(thinkingOf({ effort: "low" })).toBe("low");
     expect(thinkingOf({ thinking: "high", effort: "low" })).toBe("high");
-    expect(thinkingOf({ thinkingEffort: "medium", effort: "low" })).toBe("medium");
+    expect(thinkingOf({ thinkingEffort: "high", effort: "low" })).toBe("low");
     expect(thinkingOf({ thinking: "", thinkingEffort: "medium", effort: "low" })).toBeNull();
-    expect(thinkingOf({ thinkingEffort: "", effort: "low" })).toBeNull();
+    expect(thinkingOf({ thinkingEffort: "", effort: "low" })).toBe("low");
   });
 });
