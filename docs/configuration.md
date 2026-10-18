@@ -24,7 +24,7 @@ All fields live in the agent's `adapterConfig`.
 | `hostAuthFile` | absolute path | `<os.homedir()>/.prime/agent/auth.json` | `credential.hostAuthFile` |
 | `agentDirRoot` | absolute path | `<instanceRoot>/companies/<companyId>/agents` | §3 layout root |
 
-Empty strings count as unset. The Paperclip UI writes the thinking level as `thinkingEffort`; `thinking` wins when both are set; an empty value means Prime's own default (no `--thinking`).
+Empty strings count as unset. The Paperclip UI writes the thinking level as `thinkingEffort` (create form) or `effort` (edit form). Precedence: `thinking`, then `effort`, then `thinkingEffort` (INTERFACES §16 A21). The first key that is present wins, and an empty value means Prime's own default (no `--thinking`).
 
 ## Model
 
