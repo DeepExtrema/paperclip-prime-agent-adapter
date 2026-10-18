@@ -1,5 +1,4 @@
 // Owner: WP2. Contract: INTERFACES.md §6. Replace the stub bodies; keep the typed exports.
-import { notImplemented } from "../errors.js";
 import type { IsPrimeUnknownSessionError, ParsedPrimeOutput, ParsePrimeJsonl } from "../types.js";
 
 type JsonObject = Record<string, unknown>;
@@ -188,5 +187,12 @@ export const parsePrimeJsonl: ParsePrimeJsonl = (stdout) => {
   return result;
 };
 
-export const isPrimeUnknownSessionError: IsPrimeUnknownSessionError = () =>
-  notImplemented("WP2", "isPrimeUnknownSessionError");
+/** Same patterns as pi-local isPiUnknownSessionError (parse.ts:234-242); matches Prime's "No session found matching '<id>'." */
+export const isPrimeUnknownSessionError: IsPrimeUnknownSessionError = (stdout, stderr) => {
+  const haystack = `${stdout}\n${stderr}`
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join("\n");
+  return /unknown\s+session|session\s+not\s+found|session\s+.*\s+not\s+found|no\s+session/i.test(haystack);
+};

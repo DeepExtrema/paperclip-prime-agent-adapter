@@ -294,3 +294,22 @@ describe("parsePrimeJsonl: tool calls", () => {
     expect(parsePrimeJsonl(stdout).toolCalls).toEqual([]);
   });
 });
+
+describe("isPrimeUnknownSessionError", () => {
+  it("matches prime-agent 0.10.0's message for -r with an unknown session id", () => {
+    const stderr = "Error: No session found matching '01a14ea3-0000-7000-8000-000000000000'.\nOpen prime-agent and press left-arrow to browse sessions.\n";
+    expect(isPrimeUnknownSessionError("", stderr)).toBe(true);
+  });
+  it("matches the pi-local wordings", () => {
+    expect(isPrimeUnknownSessionError("session not found: s_123", "")).toBe(true);
+    expect(isPrimeUnknownSessionError("", "unknown session id")).toBe(true);
+    expect(isPrimeUnknownSessionError("", "Session abc was not found")).toBe(true);
+  });
+  it.each(RUNS)("%s: a captured run is not an unknown-session error", (run) => {
+    const stderr = run === "run1" ? readFileSync(new URL("./fixtures/prime-jsonl/run1.stderr.txt", import.meta.url), "utf8") : "";
+    expect(isPrimeUnknownSessionError(fixture(run), stderr)).toBe(false);
+  });
+  it("does not match unrelated text", () => {
+    expect(isPrimeUnknownSessionError("all good", "no errors")).toBe(false);
+  });
+});
