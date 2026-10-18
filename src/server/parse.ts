@@ -1,8 +1,50 @@
 // Owner: WP2. Contract: INTERFACES.md §6. Replace the stub bodies; keep the typed exports.
 import { notImplemented } from "../errors.js";
-import type { IsPrimeUnknownSessionError, ParsePrimeJsonl } from "../types.js";
+import type { IsPrimeUnknownSessionError, ParsedPrimeOutput, ParsePrimeJsonl } from "../types.js";
 
-export const parsePrimeJsonl: ParsePrimeJsonl = () => notImplemented("WP2", "parsePrimeJsonl");
+type JsonObject = Record<string, unknown>;
+
+function asObject(value: unknown): JsonObject | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as JsonObject) : null;
+}
+
+/** One stdout line as a JSON object, or null for blank, malformed and non-object lines. */
+function parseEventLine(line: string): JsonObject | null {
+  const trimmed = line.trim();
+  if (!trimmed) return null;
+  try {
+    return asObject(JSON.parse(trimmed));
+  } catch {
+    return null;
+  }
+}
+
+export const parsePrimeJsonl: ParsePrimeJsonl = (stdout) => {
+  const result: ParsedPrimeOutput = {
+    sessionId: null,
+    sessionCwd: null,
+    messages: [],
+    finalMessage: null,
+    errors: [],
+    lastStopReason: null,
+    provider: null,
+    model: null,
+    usage: null,
+    toolCalls: [],
+    sawAgentEnd: false,
+  };
+
+  for (const line of stdout.split(/\r?\n/)) {
+    const event = parseEventLine(line);
+    if (!event) continue;
+    switch (event.type) {
+      default:
+        break;
+    }
+  }
+
+  return result;
+};
 
 export const isPrimeUnknownSessionError: IsPrimeUnknownSessionError = () =>
   notImplemented("WP2", "isPrimeUnknownSessionError");
