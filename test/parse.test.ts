@@ -46,3 +46,30 @@ describe("parsePrimeJsonl: lines it cannot use", () => {
     expect(parsePrimeJsonl(noisy)).toEqual(parsePrimeJsonl(clean));
   });
 });
+
+describe("parsePrimeJsonl: session", () => {
+  const SESSION_IDS: Record<RunName, string> = {
+    run1: "01a14c2a-05ac-7659-a080-adb0fb06fb08",
+    run2: "01a14c2a-5965-7269-8920-97d0da73b791",
+    run3: "01a14c2a-5965-7269-8920-97d0da73b791",
+    run4: "01a14c2a-a744-70f9-bdde-4882ae3a009c",
+    run5: "01a14ea0-b577-7079-bda9-645362a2012f",
+  };
+  it.each(RUNS)("%s: sessionId and sessionCwd come from the session event", (run) => {
+    const parsed = parsePrimeJsonl(fixture(run));
+    expect(parsed.sessionId).toBe(SESSION_IDS[run]);
+    expect(parsed.sessionCwd).toBe("/tmp/prime-local-check-we2ejug3/ws");
+  });
+  it("keeps the first session event", () => {
+    const parsed = parsePrimeJsonl(
+      jsonl({ type: "session", id: "first", cwd: "/a" }, { type: "session", id: "second", cwd: "/b" }),
+    );
+    expect(parsed.sessionId).toBe("first");
+    expect(parsed.sessionCwd).toBe("/a");
+  });
+  it("reports null for a session event without id and cwd", () => {
+    const parsed = parsePrimeJsonl(jsonl({ type: "session", id: 7 }));
+    expect(parsed.sessionId).toBeNull();
+    expect(parsed.sessionCwd).toBeNull();
+  });
+});

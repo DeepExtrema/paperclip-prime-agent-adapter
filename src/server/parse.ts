@@ -8,6 +8,10 @@ function asObject(value: unknown): JsonObject | null {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as JsonObject) : null;
 }
 
+function asText(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
 /** One stdout line as a JSON object, or null for blank, malformed and non-object lines. */
 function parseEventLine(line: string): JsonObject | null {
   const trimmed = line.trim();
@@ -34,10 +38,19 @@ export const parsePrimeJsonl: ParsePrimeJsonl = (stdout) => {
     sawAgentEnd: false,
   };
 
+  let sawSession = false;
+
   for (const line of stdout.split(/\r?\n/)) {
     const event = parseEventLine(line);
     if (!event) continue;
     switch (event.type) {
+      case "session":
+        if (!sawSession) {
+          sawSession = true;
+          result.sessionId = asText(event.id) || null;
+          result.sessionCwd = asText(event.cwd) || null;
+        }
+        break;
       default:
         break;
     }
