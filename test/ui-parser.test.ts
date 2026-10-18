@@ -61,3 +61,13 @@ describe("message_end: thinking", () => {
     ]);
   });
 });
+
+describe("message_end: provider error", () => {
+  it("maps stopReason error to stderr with errorMessage", () => {
+    expect(parseStdoutLine(line("run1", 9), TS)).toEqual([{ kind: "stderr", ts: TS, text: "No AWS credentials available for Bedrock" }]);
+  });
+  it("uses the default text when errorMessage is missing", () => {
+    const raw = JSON.stringify({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error" } });
+    expect(parseStdoutLine(raw, TS)).toEqual([{ kind: "stderr", ts: TS, text: "Prime provider request failed." }]);
+  });
+});

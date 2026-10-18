@@ -51,6 +51,7 @@ function assistantEntries(state: ParserState, message: Record<string, unknown>, 
     if (item.type !== "toolCall") continue;
     entries.push({ kind: "tool_call", ts, name: asString(item.name, "tool"), input: item.arguments ?? {}, toolUseId: asString(item.id) });
   }
+  if (message.stopReason === "error") entries.push({ kind: "stderr", ts, text: errorText(message) });
   return entries;
 }
 
