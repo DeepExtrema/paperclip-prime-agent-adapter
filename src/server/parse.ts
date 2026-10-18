@@ -53,6 +53,16 @@ function contentText(content: unknown): string {
   return text;
 }
 
+/** Text of the last assistant message in an agent_end `messages` array, or null if there is none. */
+function lastAssistantText(messages: unknown): string | null {
+  if (!Array.isArray(messages)) return null;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = assistantMessage(messages[index]);
+    if (message) return contentText(message.content);
+  }
+  return null;
+}
+
 /** One stdout line as a JSON object, or null for blank, malformed and non-object lines. */
 function parseEventLine(line: string): JsonObject | null {
   const trimmed = line.trim();
@@ -80,6 +90,7 @@ export const parsePrimeJsonl: ParsePrimeJsonl = (stdout) => {
   };
 
   let sawSession = false;
+  let agentEndText: string | null = null;
 
   for (const line of stdout.split(/\r?\n/)) {
     const event = parseEventLine(line);
@@ -105,12 +116,14 @@ export const parsePrimeJsonl: ParsePrimeJsonl = (stdout) => {
       }
       case "agent_end":
         result.sawAgentEnd = true;
+        agentEndText = lastAssistantText(event.messages);
         break;
       default:
         break;
     }
   }
 
+  result.finalMessage = agentEndText?.trim() ? agentEndText : (result.messages.at(-1) ?? null);
   return result;
 };
 

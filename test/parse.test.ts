@@ -151,3 +151,40 @@ describe("parsePrimeJsonl: assistant turns", () => {
     expect(parsePrimeJsonl(stdout).messages).toEqual(["ab"]);
   });
 });
+
+describe("parsePrimeJsonl: finalMessage", () => {
+  const FINAL: Record<RunName, string | null> = {
+    run1: null,
+    run2: "OK",
+    run3: "PELICAN",
+    run4: "**42 HERON-42**",
+    run5: "DASH",
+  };
+  it.each(RUNS)("%s: finalMessage is the last assistant text of agent_end", (run) => {
+    expect(parsePrimeJsonl(fixture(run)).finalMessage).toBe(FINAL[run]);
+  });
+  it("skips a harness_digest custom message after the last assistant message", () => {
+    const stdout = jsonl({
+      type: "agent_end",
+      messages: [
+        { role: "assistant", content: [{ type: "text", text: "answer" }] },
+        { role: "custom", customType: "harness_digest", content: "[harness-digest]", display: false },
+      ],
+    });
+    expect(parsePrimeJsonl(stdout).finalMessage).toBe("answer");
+  });
+  it("falls back to the last turn_end text without agent_end", () => {
+    const stdout = jsonl(
+      { type: "turn_end", message: { role: "assistant", content: [{ type: "text", text: "one" }] } },
+      { type: "turn_end", message: { role: "assistant", content: [{ type: "text", text: "two" }] } },
+    );
+    expect(parsePrimeJsonl(stdout).finalMessage).toBe("two");
+  });
+  it("falls back to the last turn_end text when the last agent_end assistant message has no text", () => {
+    const stdout = jsonl(
+      { type: "turn_end", message: { role: "assistant", content: [{ type: "text", text: "earlier" }] } },
+      { type: "agent_end", messages: [{ role: "assistant", content: [] }] },
+    );
+    expect(parsePrimeJsonl(stdout).finalMessage).toBe("earlier");
+  });
+});
