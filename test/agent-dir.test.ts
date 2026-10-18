@@ -133,3 +133,31 @@ describe("seedPrimeAgentDir host_auth refusals (INTERFACES §3 step 2)", () => {
     expect(await seedErrorCode(agentPlan({ mode: "host_auth", hostAuthFile: path.join(root, "auth-dir") }))).toBe("prime_host_auth_unsafe");
   });
 });
+
+const API_KEY_CREDENTIAL: PrimeCredentialConfig = { mode: "api_key", provider: "anthropic", apiKeyEnvVar: "ANTHROPIC_API_KEY" };
+
+describe("seedPrimeAgentDir api_key (INTERFACES §3 step 3)", () => {
+  it("writes a 0600 auth.json with the trimmed key over a host-mode symlink", async () => {
+    const plan = agentPlan(API_KEY_CREDENTIAL);
+    const authFile = path.join(plan.agentDir, "auth.json");
+    await fs.mkdir(plan.agentDir, { recursive: true });
+    await fs.symlink(hostAuthFile, authFile);
+    const hostBefore = await fs.readFile(hostAuthFile, "utf8");
+    const seeded = await seedPrimeAgentDir(plan, { provider: "anthropic", env: { ANTHROPIC_API_KEY: "  sk-ant-fixture  " } });
+    const stat = await fs.lstat(authFile);
+    expect([stat.isFile(), stat.mode & 0o777]).toEqual([true, 0o600]);
+    expect(JSON.parse(await fs.readFile(authFile, "utf8"))).toEqual({ anthropic: { type: "api_key", key: "sk-ant-fixture" } });
+    expect(await fs.readFile(hostAuthFile, "utf8")).toBe(hostBefore);
+    expect(seeded).toMatchObject({ auth: "api_key_file", billingType: "api" });
+    expect(seeded.notes).toEqual([`Prime agent dir: ${plan.agentDir} (agent).`, "auth.json written from ANTHROPIC_API_KEY for provider anthropic."]);
+    expect(JSON.stringify(seeded)).not.toContain("sk-ant-fixture");
+    expect((await fs.readdir(plan.agentDir)).sort()).toEqual(["auth.json", "sessions"]);
+  });
+  it.each<[string, Record<string, string>]>([["unset", {}], ["blank", { ANTHROPIC_API_KEY: "   " }]])(
+    "refuses a key variable that is %s",
+    async (_name, env) => {
+      expect(await seedErrorCode(agentPlan(API_KEY_CREDENTIAL), env)).toBe("prime_api_key_missing");
+      expect(await exists(path.join(agentPlan().agentDir, "auth.json"))).toBe(false);
+    },
+  );
+});

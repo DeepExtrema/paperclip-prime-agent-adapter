@@ -177,7 +177,19 @@ export const seedPrimeAgentDir: SeedPrimeAgentDir = async (plan, input) => {
     const billingType = await readHostBillingType(credential.hostAuthFile, input.provider);
     return { plan, auth: "host_auth_symlink", billingType, notes };
   }
-  return notImplemented("WP1", "seedPrimeAgentDir api_key");
+  const key = (input.env[credential.apiKeyEnvVar] ?? "").trim();
+  if (key === "") {
+    const message = `Environment variable ${credential.apiKeyEnvVar} is unset or empty; it must hold the ${credential.provider} API key.`;
+    throw new PrimeCredentialError("prime_api_key_missing", message);
+  }
+  const content = `${JSON.stringify({ [credential.provider]: { type: "api_key", key } })}\n`;
+  await replaceAuthFile(authFile, (temp) => fs.writeFile(temp, content, { flag: "wx", mode: 0o600 }));
+  const written = await fs.lstat(authFile);
+  if (written.isSymbolicLink() || !isPrivateRegularFile(written)) {
+    throw new PrimeCredentialError("prime_auth_file_unsafe", `${authFile} must be a regular file owned by this user with mode 0600.`);
+  }
+  notes.push(`auth.json written from ${credential.apiKeyEnvVar} for provider ${credential.provider}.`);
+  return { plan, auth: "api_key_file", billingType: "api", notes };
 };
 
 export const createEphemeralPrimeAgentDir: CreateEphemeralPrimeAgentDir = async (credential) => {
