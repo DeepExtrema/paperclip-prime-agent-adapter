@@ -1,0 +1,59 @@
+{
+  "name": "@deepextrema/paperclip-prime-local-adapter",
+  "version": "0.1.0",
+  "description": "Paperclip external adapter that runs Prime Agent (prime-agent) locally as the prime_agent_local adapter type.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./server": {
+      "types": "./dist/server/index.d.ts",
+      "import": "./dist/server/index.js"
+    },
+    "./ui-parser": {
+      "types": "./dist/ui-parser.d.ts",
+      "import": "./dist/ui-parser.js"
+    },
+    "./ui": {
+      "types": "./dist/ui/index.d.ts",
+      "import": "./dist/ui/index.js"
+    },
+    "./cli": {
+      "types": "./dist/cli/index.d.ts",
+      "import": "./dist/cli/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "paperclip": {
+    "adapterUiParser": "1.0.0"
+  },
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "typecheck:test": "tsc -p tsconfig.test.json",
+    "postinstall": "node scripts/link-adapter-utils.mjs"
+  },
+  "dependencies": {
+    "picocolors": "^1.1.1"
+  },
+  "peerDependencies": {
+    "@paperclipai/adapter-utils": "0.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "7.0.2",
+    "vitest": "4.1.11"
+  },
+  "engines": {
+    "node": ">=24.11.0"
+  }
+}
