@@ -191,3 +191,16 @@ describe("execute: uncertain runs (INTERFACES §11.7, L8)", () => {
     expect(result).not.toHaveProperty("sessionParams");
   });
 });
+describe("execute: timeout (INTERFACES §11.1, §11.7, L9)", () => {
+  it("kills a run that ignores SIGTERM after graceSec and maps it to prime_run_timeout", async () => {
+    const { result } = await run({ config: { timeoutSec: 2, graceSec: 1 }, env: { FAKE_PRIME_MODE: "hang", FAKE_PRIME_IGNORE_TERM: "1" } });
+    expect(result).toMatchObject({ timedOut: true, signal: "SIGKILL", errorCode: "prime_run_timeout", errorMessage: "Timed out after 2s", clearSession: false });
+    expect(result).not.toHaveProperty("sessionParams");
+    expect(() => process.kill(runCalls()[0]!.pid, 0)).toThrow();
+  }, 15_000);
+  it("counts the timeout from execute start, not from spawn", async () => {
+    const started = Date.now();
+    const { result } = await run({ config: { timeoutSec: 2, graceSec: 1 }, env: { FAKE_PRIME_MODE: "hang", FAKE_PRIME_VERSION_DELAY_MS: "1500" } });
+    expect([result.timedOut, Date.now() - started < 3000]).toEqual([true, true]);
+  }, 15_000);
+});

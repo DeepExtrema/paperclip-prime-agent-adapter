@@ -79,7 +79,8 @@ async function prepareRun(ctx: AdapterExecutionContext, startedAtMs: number): Pr
   const { env: childEnv } = buildPrimeChildEnv(process.env, runtime.agentDir, paperclipEnv);
   const seeded = await seedPrimeAgentDir(runtime.agentDir, { provider: runtime.provider, env: paperclipEnv });
   const skills = await stagePrimeSkills(ctx.config);
-  return { runtime, cwd, paperclipEnv, childEnv, seeded, skills, deadlineMs: null };
+  const deadlineMs = runtime.timeoutSec > 0 ? startedAtMs + runtime.timeoutSec * 1000 : null;
+  return { runtime, cwd, paperclipEnv, childEnv, seeded, skills, deadlineMs };
 }
 /** pi-local execute.ts 574-635 (system prompt part). */
 async function buildSystemPrompt(ctx: AdapterExecutionContext, runtime: PrimeRuntimeConfig, cwd: string): Promise<SystemPrompt> {
@@ -138,7 +139,7 @@ async function runAttempt(ctx: AdapterExecutionContext, prep: PreparedRun, syste
   const proc = await runChildProcess(ctx.runId, runtime.command, args, {
     cwd,
     env: prep.childEnv as Record<string, string>, // INTERFACES §16 A8: runChildProcess deletes undefined keys after merging process.env
-    timeoutSec: runtime.timeoutSec,
+    timeoutSec: prep.deadlineMs === null ? 0 : Math.max(0.001, (prep.deadlineMs - Date.now()) / 1000),
     graceSec: runtime.graceSec,
     onLog: ctx.onLog,
     onSpawn: ctx.onSpawn,
@@ -160,6 +161,9 @@ function mapResult(attempt: Attempt, prep: PreparedRun, clearSession: boolean): 
     clearSession,
   };
   const failedExitCode = proc.exitCode !== null && proc.exitCode !== 0 ? proc.exitCode : 1;
+  if (proc.timedOut) {
+    return { ...base, timedOut: true, errorCode: "prime_run_timeout", errorMessage: `Timed out after ${runtime.timeoutSec}s` };
+  }
   if (!parsed.sawAgentEnd) {
     const how = `exit ${proc.exitCode ?? "none"}, signal ${proc.signal ?? "none"}`;
     const stderrLine = firstNonEmptyLine(proc.stderr);
