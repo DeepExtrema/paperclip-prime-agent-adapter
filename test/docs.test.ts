@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const read = (rel: string) => readFileSync(path.join(repoRoot, rel), "utf8");
 
-const DOCS = ["README.md", "docs/install.md"];
+const DOCS = ["README.md", "docs/install.md", "docs/configuration.md"];
 const CLAIM_LEVELS = ["registered/loaded", "deterministic-qualified", "live-qualified", "not qualified"];
 const PRIVATE_PATTERNS: Array<[string, RegExp]> = [
   ["absolute home path", /\/home\/[^\s/`'")]+/],
@@ -43,5 +43,15 @@ describe("README.md qualification table (L4)", () => {
     const rows = section.split("\n").filter((line) => line.startsWith("|") && !/^\|\s*-/.test(line) && !line.startsWith("| Surface"));
     expect(rows.length).toBeGreaterThan(0);
     for (const row of rows) expect(CLAIM_LEVELS).toContain(row.split("|")[2]?.trim());
+  });
+});
+
+describe("docs/configuration.md", () => {
+  it("documents every adapterConfig key from INTERFACES.md §2", () => {
+    const section = read("INTERFACES.md").split("\n## 2.")[1]!.split("\n## 3.")[0]!;
+    const keys = [...section.matchAll(/^\| `([A-Za-z]+)`/gm)].map((match) => match[1]!);
+    expect(keys).toHaveLength(17);
+    const doc = read("docs/configuration.md");
+    for (const key of keys) expect(doc, key).toContain("`" + key + "`");
   });
 });
