@@ -77,7 +77,7 @@ function parseCredential(config: Record<string, unknown>, provider: string): Pri
 
 export const resolvePrimeRuntimeConfig: ResolvePrimeRuntimeConfig = (config, agent, instanceRoot) => {
   const { modelRef, provider, model } = splitModelRef(config.model);
-  const thinking = parseThinking(isUnset(config.thinking) ? config.thinkingEffort : config.thinking); // §16 A6
+  const thinking = parseThinking([config.thinking, config.thinkingEffort, config.effort].find((value) => value !== undefined)); // §16 A21
   const credential = parseCredential(config, provider);
   const cwd = absolutePath(config.cwd, "cwd");
   if (!SAFE_PATH_SEGMENT.test(agent.id) || !SAFE_PATH_SEGMENT.test(agent.companyId)) {

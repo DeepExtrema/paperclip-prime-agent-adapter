@@ -76,7 +76,7 @@ describe("resolvePrimeRuntimeConfig thinking (INTERFACES §2, §16 A6)", () => {
   it("reads thinkingEffort (host UI key) when thinking is unset; empty means Prime default", () => {
     const thinkingOf = (config: Record<string, unknown>) => resolvePrimeRuntimeConfig({ model: "a/b", ...config }, AGENT, INSTANCE_ROOT).thinking;
     expect(thinkingOf({ thinkingEffort: "low" })).toBe("low");
-    expect(thinkingOf({ thinking: "", thinkingEffort: "medium" })).toBe("medium");
+    expect(thinkingOf({ thinking: "", thinkingEffort: "medium" })).toBeNull();
     expect(thinkingOf({ thinking: "high", thinkingEffort: "low" })).toBe("high");
     expect(thinkingOf({ thinkingEffort: "" })).toBeNull();
     expect(configErrorCode({ model: "a/b", thinkingEffort: "turbo" })).toBe("prime_thinking_invalid");
@@ -105,5 +105,16 @@ describe("resolvePrimeRuntimeConfig paths (INTERFACES §2)", () => {
     ["relative instance root", { model: "a/b" }, AGENT, "instances/default"],
   ])("refuses %s", (_name, config, agent, instanceRoot) => {
     expect(configErrorCode(config, agent, instanceRoot)).toBe("prime_path_invalid");
+  });
+});
+
+describe("resolvePrimeRuntimeConfig effort alias (§16 A21)", () => {
+  it("uses the first non-undefined thinking key, including blank as Prime default", () => {
+    const thinkingOf = (config: Record<string, unknown>) => resolvePrimeRuntimeConfig({ model: "a/b", ...config }, AGENT, INSTANCE_ROOT).thinking;
+    expect(thinkingOf({ effort: "low" })).toBe("low");
+    expect(thinkingOf({ thinking: "high", effort: "low" })).toBe("high");
+    expect(thinkingOf({ thinkingEffort: "medium", effort: "low" })).toBe("medium");
+    expect(thinkingOf({ thinking: "", thinkingEffort: "medium", effort: "low" })).toBeNull();
+    expect(thinkingOf({ thinkingEffort: "", effort: "low" })).toBeNull();
   });
 });
