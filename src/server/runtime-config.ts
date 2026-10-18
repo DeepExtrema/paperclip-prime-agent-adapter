@@ -115,7 +115,32 @@ export const createEphemeralPrimeAgentDir: CreateEphemeralPrimeAgentDir = async 
   notImplemented("WP1", "createEphemeralPrimeAgentDir");
 
 // §4 buildPrimeChildEnv
-export const buildPrimeChildEnv: BuildPrimeChildEnv = () => notImplemented("WP1", "buildPrimeChildEnv");
+function hasPrefix(key: string, prefixes: readonly string[]): boolean {
+  return prefixes.some((prefix) => key.startsWith(prefix));
+}
+
+const PROVIDER_KEYS: readonly string[] = PRIME_PROVIDER_CREDENTIAL_ENV_KEYS;
+const OWNED_KEYS: readonly string[] = PRIME_ADAPTER_OWNED_ENV_KEYS;
+
+/** Stripped keys stay as explicit undefined: runChildProcess merges process.env first, then deletes undefined keys (§16 A8). */
+export const buildPrimeChildEnv: BuildPrimeChildEnv = (base, plan, paperclipEnv) => {
+  const dropped = new Set<string>();
+  const env: Record<string, string | undefined> = {};
+  for (const [key, value] of Object.entries(sanitizeInheritedPaperclipEnv(base))) { // §16 A17: no server PAPERCLIP_* secrets
+    if (value === undefined) continue;
+    const strip = hasPrefix(key, PRIME_STRIPPED_ENV_PREFIXES) || PROVIDER_KEYS.includes(key);
+    if (strip) dropped.add(key);
+    env[key] = strip ? undefined : value;
+  }
+  for (const [key, value] of Object.entries(paperclipEnv)) {
+    const strip = hasPrefix(key, PRIME_ALWAYS_STRIPPED_ENV_PREFIXES) || OWNED_KEYS.includes(key);
+    if (strip) dropped.add(key);
+    env[key] = strip ? undefined : value;
+  }
+  env.PRIME_AGENT_CODING_AGENT_DIR = plan.agentDir;
+  env.PRIME_AGENT_TELEMETRY = "0";
+  return { env: { ...ensurePathInEnv(env) }, droppedKeys: [...dropped].sort() };
+};
 
 // §16 A15
 
