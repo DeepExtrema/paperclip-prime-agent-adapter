@@ -159,6 +159,11 @@ function mapResult(attempt: Attempt, prep: PreparedRun, clearSession: boolean): 
     resultJson: { stdout: proc.stdout, stderr: proc.stderr, cacheWriteTokens: usage?.cacheWriteTokens ?? null, totalTokens: usage?.totalTokens ?? null },
     clearSession,
   };
+  const failedExitCode = proc.exitCode !== null && proc.exitCode !== 0 ? proc.exitCode : 1;
+  if (parsed.errors.length > 0 || proc.exitCode !== 0) {
+    const message = parsed.errors[0] ?? (firstNonEmptyLine(proc.stderr) || `prime-agent exited with code ${proc.exitCode}`);
+    return { ...base, exitCode: failedExitCode, errorCode: "prime_run_failed", errorMessage: message };
+  }
   const sessionId = clearSession ? null : parsed.sessionId;
   const sessionParams: PrimeSessionParams | null = sessionId
     ? { sessionId, sessionFile: path.join(runtime.agentDir.sessionDir, `${sessionId}.jsonl`), cwd: prep.cwd,

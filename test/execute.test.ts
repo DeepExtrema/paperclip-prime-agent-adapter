@@ -172,3 +172,15 @@ describe("execute: unknown session (INTERFACES §11.6)", () => {
     expect(result).not.toHaveProperty("sessionParams");
   });
 });
+describe("execute: failed runs (INTERFACES §11.7)", () => {
+  it("maps a provider error reported with exit 0 to prime_run_failed with Prime's message", async () => {
+    const { result } = await run({ env: { FAKE_PRIME_STDOUT_FILE: RUN1 } });
+    expect(result).toMatchObject({ exitCode: 1, timedOut: false, errorCode: "prime_run_failed", errorMessage: "No AWS credentials available for Bedrock", clearSession: false });
+    expect(result).not.toHaveProperty("sessionParams");
+  });
+  it("maps a non-zero exit to prime_run_failed with the first stderr line", async () => {
+    const { result } = await run({ env: { FAKE_PRIME_EXIT_CODE: "2", FAKE_PRIME_STDERR: "boom: provider unreachable\nmore\n" } });
+    expect(result).toMatchObject({ exitCode: 2, errorCode: "prime_run_failed", errorMessage: "boom: provider unreachable" });
+    expect(result).not.toHaveProperty("sessionParams");
+  });
+});
