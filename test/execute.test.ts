@@ -222,3 +222,11 @@ describe("execute: cost (MASTER-PLAN decisions, INTERFACES §11.7, §16 A3)", ()
     expect(result).toMatchObject({ billingType: "subscription", costUsd: null });
   });
 });
+describe("execute: onLog streaming (pi-local execute.ts 714-753)", () => {
+  it("forwards stdout as whole lines while prime-agent writes partial chunks", async () => {
+    const { logs } = await run({ env: { FAKE_PRIME_CHUNK_BYTES: "500" } });
+    const chunks = logs.filter(([stream, chunk]) => stream === "stdout" && !chunk.startsWith("[paperclip]")).map(([, chunk]) => chunk);
+    expect(chunks.every((chunk) => chunk.indexOf("\n") === chunk.length - 1)).toBe(true);
+    expect(chunks.join("")).toBe(readFileSync(RUN2, "utf8"));
+  });
+});

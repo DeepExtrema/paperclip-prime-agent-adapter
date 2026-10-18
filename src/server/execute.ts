@@ -119,6 +119,20 @@ function buildUserPrompt(ctx: AdapterExecutionContext, runtime: PrimeRuntimeConf
     joinPromptSections([bootstrap, sections.wakePrompt, sections.taskContextNote, asString(context.paperclipSessionHandoffMarkdown, "").trim(), heartbeat]),
   ]);
 }
+/** pi-local execute.ts 714-753: stdout reaches onLog as whole lines; stderr passes through. */
+function lineBufferedLog(onLog: AdapterExecutionContext["onLog"]) {
+  let buffer = "";
+  const flush = async () => {
+    if (buffer) await onLog("stdout", buffer);
+    buffer = "";
+  };
+  return { flush, onLog: async (stream: "stdout" | "stderr", chunk: string) => {
+    if (stream === "stderr") return onLog(stream, chunk);
+    const lines = (buffer + chunk).split("\n");
+    buffer = lines.pop() ?? "";
+    for (const line of lines) if (line) await onLog(stream, `${line}\n`);
+  } };
+}
 async function runAttempt(ctx: AdapterExecutionContext, prep: PreparedRun, system: SystemPrompt, notes: string[], resumeSessionFile: string | null): Promise<Attempt> {
   const { runtime, cwd } = prep;
   const prompt = buildUserPrompt(ctx, runtime, system.ownsDefaultPolicy, resumeSessionFile !== null);
@@ -136,14 +150,16 @@ async function runAttempt(ctx: AdapterExecutionContext, prep: PreparedRun, syste
     env: buildInvocationEnvForLogs(loggedEnv, { runtimeEnv, includeRuntimeKeys: ["HOME"], resolvedCommand }),
     prompt, promptMetrics: { systemPromptChars: system.text.length, promptChars: prompt.length }, context: ctx.context,
   });
+  const lines = lineBufferedLog(ctx.onLog);
   const proc = await runChildProcess(ctx.runId, runtime.command, args, {
     cwd,
     env: prep.childEnv as Record<string, string>, // INTERFACES §16 A8: runChildProcess deletes undefined keys after merging process.env
     timeoutSec: prep.deadlineMs === null ? 0 : Math.max(0.001, (prep.deadlineMs - Date.now()) / 1000),
     graceSec: runtime.graceSec,
-    onLog: ctx.onLog,
+    onLog: lines.onLog,
     onSpawn: ctx.onSpawn,
   });
+  await lines.flush();
   return { proc, parsed: parsePrimeJsonl(proc.stdout) };
 }
 /** INTERFACES §11.7. Failed, uncertain, timed-out and cancelled runs carry no session fields. */
