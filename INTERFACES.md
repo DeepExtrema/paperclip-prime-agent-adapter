@@ -257,3 +257,10 @@ See `test/fixtures/README.md`. Real captures from prime-agent 0.10.0; `/tmp` pat
 ## 15. Change control
 
 Changes to this file or `src/types.ts`/`src/errors.ts` are made only by the parent on `main`, with a commit message `interfaces: ...` and a note in the affected WP plans.
+
+## 16. Parent amendments (after WP0 freeze)
+
+- A1 (2026-10-18, from WP2 plan §9.2): `isError` for a tool call is read from the `toolResult` event and from `turn_end.toolResults`, not from `tool_execution_end` (Prime 0.10.0 has no `isError` there). §6 is read with this correction.
+- A2 (from WP2 §9.1, verified by a network-isolated probe): `-r <unknown id>` exits 1 with "Error: No session found matching '<id>'" (pi-local unknown-session regex matches). `-r <missing path>` silently starts a NEW session at that path; `-r <existing non-session file>` OVERWRITES it. Therefore WP3 resumes only when the §7 header check passes on an existing session file, and never passes a non-existent path to `-r`. §14.5 resolved.
+- A3 (parent observation, run5): Prime reports a non-zero `usage.cost` on a subscription run when `--append-system-prompt` is used (0.0132 USD, cacheWrite priced) while runs 2-4 report 0. Prime's cost field is an estimate, not a charge. The `costUsd` rule stays: only when `billingType` is api-key; otherwise null. The fixtures README must list run5 with this note (WP2 may add the README line; it is in WP2's fixture scope).
+- A4: usage is `null` until an assistant `turn_end` carries a `usage` object (both wordings in §6/types.ts mean this).
