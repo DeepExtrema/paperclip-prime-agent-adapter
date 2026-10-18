@@ -189,7 +189,8 @@ export const PRIME_PROVIDER_CREDENTIAL_ENV_KEYS = [
 ] as const;
 
 export interface PrimeChildEnv {
-  env: Record<string, string>;
+  /** A8: stripped keys are present with value `undefined` so runChildProcess deletes them after its own process.env merge. */
+  env: Record<string, string | undefined>;
   /** Names (never values) of keys removed from base or Paperclip env. */
   droppedKeys: string[];
 }
@@ -350,8 +351,8 @@ export type ParsePrimeModelList = (stdout: string) => PrimeModelRow[];
 
 export type ListPrimeModels = (input: {
   command: string;
-  /** Child env; MUST set PRIME_AGENT_CODING_AGENT_DIR (model list writes auth.json and models/ there). */
-  env: Record<string, string>;
+  /** Child env; MUST set PRIME_AGENT_CODING_AGENT_DIR (model list writes auth.json and models/ there). A8: pass to runChildProcess unchanged, undefined entries included. */
+  env: Record<string, string | undefined>;
   cwd: string;
 }) => Promise<AdapterModel[]>;
 
@@ -363,7 +364,8 @@ export type DetectPrimeModel = (agentDir: string) => Promise<{
 
 export type ReadPrimeVersion = (input: {
   command: string;
-  env: Record<string, string>;
+  /** A8: pass to runChildProcess unchanged, undefined entries included. */
+  env: Record<string, string | undefined>;
   cwd: string;
 }) => Promise<string>;
 
