@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { decidePrimeResume, primeSessionCodec, readPrimeSessionHeader } from "../src/server/session.js";
 import type { PrimeSessionParams } from "../src/types.js";
 
@@ -86,5 +86,25 @@ describe("resume decision (INTERFACES §7)", () => {
     expect(decide({ header: null })).toEqual({ resume: false, reason: "session_file_missing" });
     expect(decide({ header: { ...header, id: "other-session" } })).toEqual({ resume: false, reason: "session_header_mismatch" });
     expect(decide({ header: { ...header, cwd: "/elsewhere" } })).toEqual({ resume: false, reason: "session_header_mismatch" });
+  });
+});
+
+describe("bounded session header read (code review 2)", () => {
+  it("reads at most 64 KiB for a valid header with a larger session body", async () => {
+    const sessionFile = await scratchFile('{"type":"session","id":"large-session","cwd":"/work/project"}\n' + '{"type":"message","text":"' + "x".repeat(128 * 1024) + '"}\n');
+    const handle = await fs.open(sessionFile, "r");
+    const read = vi.spyOn(handle, "read");
+    const open = vi.spyOn(fs, "open").mockResolvedValue(handle);
+    try {
+      await expect(readPrimeSessionHeader(sessionFile)).resolves.toEqual({ id: "large-session", cwd: "/work/project" });
+      expect(read).toHaveBeenCalledTimes(1);
+      expect(read).toHaveBeenCalledWith(expect.any(Buffer), 0, 65536, 0);
+      const result = await read.mock.results[0]!.value;
+      expect(result.bytesRead).toBe(65536);
+    } finally {
+      open.mockRestore();
+      read.mockRestore();
+      await handle.close();
+    }
   });
 });

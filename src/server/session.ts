@@ -27,14 +27,21 @@ export const primeSessionCodec: AdapterSessionCodec = {
 
 export const readPrimeSessionHeader: ReadPrimeSessionHeader = async (sessionFile) => {
   try {
-    const text = await fs.readFile(sessionFile, "utf8");
-    const line = text.split(/\r?\n/).find((line) => line.trim().length > 0);
-    if (!line) return null;
-    const raw: unknown = JSON.parse(line);
-    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
-    const { type, id, cwd } = raw as Record<string, unknown>;
-    if (type !== "session" || !isNonEmptyString(id)) return null;
-    return { id, cwd: isNonEmptyString(cwd) ? cwd : null };
+    const handle = await fs.open(sessionFile, "r");
+    try {
+      const buffer = Buffer.alloc(65536);
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+      const text = buffer.toString("utf8", 0, bytesRead);
+      const line = text.split(/\r?\n/).find((line) => line.trim().length > 0);
+      if (!line) return null;
+      const raw: unknown = JSON.parse(line);
+      if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+      const { type, id, cwd } = raw as Record<string, unknown>;
+      if (type !== "session" || !isNonEmptyString(id)) return null;
+      return { id, cwd: isNonEmptyString(cwd) ? cwd : null };
+    } finally {
+      await handle.close();
+    }
   } catch {
     return null;
   }
