@@ -17,7 +17,7 @@ import {
 } from "../types.js";
 import { assertPrimeModelListed, listPrimeModels } from "./models.js";
 import { isPrimeUnknownSessionError, parsePrimeJsonl } from "./parse.js";
-import { buildPrimeChildEnv, resolvePrimeRuntimeConfig, seedPrimeAgentDir } from "./runtime-config.js";
+import { assertPrimeCwdAllowed, buildPrimeChildEnv, resolvePrimeRuntimeConfig, seedPrimeAgentDir } from "./runtime-config.js";
 import { decidePrimeResume, primeSessionCodec, readPrimeSessionHeader } from "./session.js";
 import { stagePrimeSkills } from "./skills.js";
 import { isSupportedPrimeVersion, readPrimeVersion } from "./version.js";
@@ -50,6 +50,7 @@ async function buildPaperclipRunEnv(ctx: AdapterExecutionContext, runtime: Prime
   const [workspaceCwd, workspaceSource, configuredCwd] = [asString(workspace.cwd, ""), asString(workspace.source, ""), runtime.cwd ?? ""];
   const effectiveWorkspaceCwd = workspaceSource === "agent_home" && configuredCwd ? "" : workspaceCwd;
   const cwd = effectiveWorkspaceCwd || configuredCwd || process.cwd();
+  await assertPrimeCwdAllowed(cwd);
   await ensureAbsoluteDirectory(cwd, { createIfMissing: true });
   const env: Record<string, string> = { ...buildPaperclipEnv(agent), ...buildRuntimeToolsEnv(ctx.runtimeTools), PAPERCLIP_RUN_ID: runId };
   const linkedIssueIds = Array.isArray(context.issueIds) ? context.issueIds.filter((id): id is string => nonEmpty(id) !== null) : [];

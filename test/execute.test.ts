@@ -275,3 +275,14 @@ describe("execute: cancellation (INTERFACES §11.2, §16 A18)", () => {
     expect([result.errorCode, ready, calls().length, runCalls().length]).toEqual(["prime_run_cancelled", 1, 2, 0]);
   });
 });
+describe("execute: protected cwd (INTERFACES §16 A15, L6)", () => {
+  it("refuses a workspace cwd under a protected root before creating it", async () => {
+    const protectedCwd = path.join(root, "home", ".prime", "agent", "ws-new");
+    const made = makeCtx();
+    made.ctx.context.paperclipWorkspace = { cwd: protectedCwd, source: "project_primary" };
+    const result = await execute(made.ctx);
+    expect(result).toMatchObject({ errorCode: "prime_preflight_failed", errorMeta: { primeErrorCode: "prime_path_invalid" } });
+    expect(existsSync(protectedCwd)).toBe(false);
+    expect(calls()).toEqual([]);
+  });
+});
