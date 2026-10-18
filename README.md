@@ -30,6 +30,13 @@ scripts/install-local.sh --api-url http://127.0.0.1:3100/api
 
 The agent's `model` must be a `provider/modelId` value listed by `prime-agent model list`.
 
+## Documentation
+
+- [Install](docs/install.md)
+- [Configuration](docs/configuration.md)
+- [Credentials](docs/credentials.md)
+- [Troubleshooting](docs/troubleshooting.md)
+
 ## Security
 
 - No containment: Prime runs as the Paperclip server user and the agent runs model-chosen code. A prompt is not a sandbox.

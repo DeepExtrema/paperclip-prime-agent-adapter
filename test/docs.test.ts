@@ -2,11 +2,12 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { PRIME_CHECK_CODES, PRIME_RESULT_ERROR_CODES } from "../src/types.js";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const read = (rel: string) => readFileSync(path.join(repoRoot, rel), "utf8");
 
-const DOCS = ["README.md", "docs/install.md", "docs/configuration.md", "docs/credentials.md"];
+const DOCS = ["README.md", "docs/install.md", "docs/configuration.md", "docs/credentials.md", "docs/troubleshooting.md"];
 const CLAIM_LEVELS = ["registered/loaded", "deterministic-qualified", "live-qualified", "not qualified"];
 const PRIVATE_PATTERNS: Array<[string, RegExp]> = [
   ["absolute home path", /\/home\/[^\s/`'")]+/],
@@ -53,5 +54,15 @@ describe("docs/configuration.md", () => {
     expect(keys).toHaveLength(17);
     const doc = read("docs/configuration.md");
     for (const key of keys) expect(doc, key).toContain("`" + key + "`");
+  });
+});
+
+describe("docs/troubleshooting.md", () => {
+  it("documents every check code, result error code and thrown error code", () => {
+    const thrown = [...read("src/errors.ts").matchAll(/"(prime_[a-z_]+)"/g)].map((match) => match[1]!);
+    const codes = new Set<string>([...PRIME_CHECK_CODES, ...PRIME_RESULT_ERROR_CODES, ...thrown]);
+    expect(codes.size).toBe(34);
+    const doc = read("docs/troubleshooting.md");
+    for (const code of codes) expect(doc, code).toContain("`" + code + "`");
   });
 });
