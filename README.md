@@ -51,8 +51,9 @@ Claim levels: registered/loaded, deterministic-qualified, live-qualified; anythi
 | Surface | Claim level | Evidence |
 |---|---|---|
 | Plugin shape expected by Paperclip's loader (`createServerAdapter`) | deterministic-qualified | `test/contract.test.ts` |
+| Plugin registered and loaded by Paperclip 2026.1005.0 (POST /api/adapters/install, throwaway instance) | registered/loaded | WP7 smoke check "adapter loaded from external plugin" |
 | Config, credentials, env hygiene, argv, JSONL parsing, session codec, skills, models, environment test, UI parser | deterministic-qualified | unit tests in `test/` against captured prime-agent 0.10.0 output |
-| Coordinator wake, issue wake and two concurrent agents in a throwaway Paperclip | not qualified | pending the WP7 smoke |
+| Coordinator wake without an issue, specialist wake on the created issue, two agents at once on one symlinked subscription (throwaway Paperclip 2026.1005.0, prime-agent 0.10.0, anthropic/claude-haiku-4-5, thinking off, 2026-10-18) | not qualified | WP7 smoke: 23 of 24 checks passed; failed: model list includes the smoke model. Model list: not qualified in attempt-1 (server PATH); fixed in follow-up F1, re-verified: pending. `listModels()` invokes bare `prime-agent` without agent context; the smoke server PATH lacks `~/.local/bin`. Runs and testEnvironment use the agent's absolute `command` and passed. |
 
 ## License
 

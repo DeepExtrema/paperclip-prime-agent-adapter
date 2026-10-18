@@ -22,7 +22,7 @@ Usage tokens are reported when Prime reports them. `costUsd` is Prime's `usage.c
 
 ## Several agents on one subscription
 
-Several agents may link the same host `auth.json`. Paperclip runs agents in parallel. Whether Prime 0.10.0 serializes a token refresh across agent dirs is not verified yet; the WP7 smoke records what it observed.
+Observed on 2026-10-18 (prime-agent 0.10.0): two concurrent runs on one symlinked subscription succeeded; no token refresh happened during the smoke, so refresh serialization stays UNVERIFIED.
 
 ## Security
 
