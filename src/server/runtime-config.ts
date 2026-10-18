@@ -109,8 +109,64 @@ export const resolvePrimeRuntimeConfig: ResolvePrimeRuntimeConfig = (config, age
 };
 
 // §3 agent dir
+/** Reduced salvage §2.4 list: INTERFACES §3 home entries; instance dirs from Paperclip packages/shared/src/home-paths.ts. */
+const PROTECTED_HOME_ENTRIES = [".prime", ".pi", ".codex", ".claude", ".ssh", ".gnupg", ".aws", ".config"];
+const PROTECTED_INSTANCE_ENTRIES = ["secrets", "db", path.join("data", "backups"), "logs"];
+function unsafeAgentDir(message: string, cause?: unknown): never {
+  throw new PrimeCredentialError("prime_agent_dir_unsafe", message, cause === undefined ? undefined : { cause });
+}
+
+function isSameOrInside(child: string, parent: string): boolean {
+  const relative = path.relative(parent, child);
+  return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+}
+
+function protectedPaths(): string[] {
+  const instanceRoot = resolvePaperclipInstanceRootForAdapter();
+  return [
+    ...PROTECTED_HOME_ENTRIES.map((entry) => path.join(os.homedir(), entry)),
+    ...PROTECTED_INSTANCE_ENTRIES.map((entry) => path.join(instanceRoot, entry)),
+  ];
+}
+
+/** Real path of the longest existing prefix, with the missing rest appended. */
+async function canonicalPath(target: string): Promise<string> {
+  const missing: string[] = [];
+  let existing = target;
+  for (;;) {
+    try {
+      return path.join(await fs.realpath(existing), ...missing);
+    } catch {
+      const parent = path.dirname(existing);
+      if (parent === existing) return target;
+      missing.unshift(path.basename(existing));
+      existing = parent;
+    }
+  }
+}
+
+async function assertAgentDirLocation(agentDir: string): Promise<void> {
+  if (!path.isAbsolute(agentDir) || path.normalize(agentDir) !== agentDir) {
+    unsafeAgentDir(`Prime agent dir must be an absolute, normalized path: ${agentDir}`);
+  }
+  const realAgentDir = await canonicalPath(agentDir);
+  for (const protectedPath of await Promise.all(protectedPaths().map(canonicalPath))) {
+    if (isSameOrInside(realAgentDir, protectedPath) || isSameOrInside(protectedPath, realAgentDir)) {
+      unsafeAgentDir(`Prime agent dir ${agentDir} (real path ${realAgentDir}) overlaps protected path ${protectedPath}.`);
+    }
+  }
+}
+
 async function ensurePrivateDir(dir: string): Promise<void> {
-  await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+  try {
+    await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+  } catch (err) {
+    unsafeAgentDir(`Cannot create Prime agent dir ${dir}.`, err);
+  }
+  const stat = await fs.lstat(dir);
+  if (stat.isSymbolicLink() || !stat.isDirectory() || stat.uid !== process.getuid?.()) {
+    unsafeAgentDir(`${dir} must be a real directory owned by this user, not a symlink.`);
+  }
   await fs.chmod(dir, 0o700);
 }
 
@@ -165,9 +221,13 @@ async function readHostBillingType(hostAuthFile: string, provider: string): Prom
 }
 
 export const seedPrimeAgentDir: SeedPrimeAgentDir = async (plan, input) => {
+  await assertAgentDirLocation(plan.agentDir);
   await ensurePrivateDir(plan.agentDir);
   await ensurePrivateDir(plan.sessionDir);
   const authFile = path.join(plan.agentDir, "auth.json");
+  if ((await fs.lstat(authFile).catch(() => null))?.isDirectory()) {
+    unsafeAgentDir(`${authFile} is a directory.`);
+  }
   const notes = [`Prime agent dir: ${plan.agentDir} (${plan.kind}).`];
   const credential = plan.credential;
   if (credential.mode === "host_auth") {

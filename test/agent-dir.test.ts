@@ -161,3 +161,35 @@ describe("seedPrimeAgentDir api_key (INTERFACES §3 step 3)", () => {
     },
   );
 });
+
+describe("seedPrimeAgentDir agent dir safety (INTERFACES §3 step 1, L6)", () => {
+  it("refuses an agent dir that is a symlink and writes nothing through it", async () => {
+    await fs.mkdir(path.join(root, "elsewhere"));
+    await fs.symlink(path.join(root, "elsewhere"), path.join(root, "linked-home"));
+    expect(await seedErrorCode(agentPlan(undefined, path.join(root, "linked-home")))).toBe("prime_agent_dir_unsafe");
+    expect(await fs.readdir(path.join(root, "elsewhere"))).toEqual([]);
+  });
+  it.each([[".prime/agent"], [".pi"], [".codex"], [".claude"], [".ssh"], [".gnupg"], [".aws"], [".config"]])(
+    "refuses an agent dir inside ~/%s and creates nothing",
+    async (entry) => {
+      expect(await seedErrorCode(agentPlan(undefined, path.join(home, entry, "agent-1", "home")))).toBe("prime_agent_dir_unsafe");
+      expect(await exists(path.join(home, entry, "agent-1"))).toBe(false);
+    },
+  );
+  it.each([["secrets"], ["db"], ["data/backups"], ["logs"]])("refuses an agent dir inside the instance %s dir", async (entry) => {
+    const agentDir = path.join(root, "paperclip/instances/default", entry, "agent-1");
+    expect(await seedErrorCode(agentPlan(undefined, agentDir))).toBe("prime_agent_dir_unsafe");
+  });
+  it("refuses an agent dir that contains a protected path", async () => {
+    expect(await seedErrorCode(agentPlan(undefined, home))).toBe("prime_agent_dir_unsafe");
+  });
+  it("refuses an agent dir whose real path is inside a protected path", async () => {
+    await fs.symlink(path.join(home, ".prime"), path.join(root, "agents-link"));
+    expect(await seedErrorCode(agentPlan(undefined, path.join(root, "agents-link", "agent-1", "home")))).toBe("prime_agent_dir_unsafe");
+    expect(await fs.readdir(path.join(home, ".prime"))).toEqual(["agent"]);
+  });
+  it("refuses an auth.json that is a directory", async () => {
+    await fs.mkdir(path.join(agentPlan().agentDir, "auth.json"), { recursive: true });
+    expect(await seedErrorCode(agentPlan())).toBe("prime_agent_dir_unsafe");
+  });
+});
