@@ -81,3 +81,45 @@ describe("buildPrimeArgs (INTERFACES §5)", () => {
     expect(args).toEqual(["--mode", "json", "-p", "--provider", "anthropic", "--model", "claude-haiku-4-5", "--cwd", "/w", "--session-dir", "/a/sessions", "--", "hi"]);
   });
 });
+describe("execute: fresh run (INTERFACES §11.3, §11.5, §11.7)", () => {
+  it("spawns prime-agent once with the §5 argv and Paperclip env, and maps a completed run", async () => {
+    process.env.DATABASE_URL = "postgres://paperclip:pw@127.0.0.1:5432/paperclip";
+    const { result, metas } = await run({ config: { appendSystemPrompt: "EXTRA-SYS" } });
+    expect(runCalls()).toHaveLength(1);
+    const { argv, cwd, env } = runCalls()[0]!;
+    expect(argv.slice(0, 11)).toEqual(["--mode", "json", "-p", "--provider", "anthropic", "--model", "claude-haiku-4-5", "--cwd", ws(), "--session-dir", sessionDir()]);
+    expect(argv).not.toContain("-r");
+    expect(appendArgs(argv).map((text, i) => (i === 0 ? text.includes("You are agent agent-1 (Prime Tester).") : text))).toEqual([true, "EXTRA-SYS"]);
+    expect([argv.at(-2), argv.at(-1)?.includes("Reply with PELICAN-7."), cwd]).toEqual(["--", true, ws()]);
+    expect(env).toMatchObject({
+      PAPERCLIP_API_KEY: "run-jwt-token", PAPERCLIP_RUN_ID: "run-1", PAPERCLIP_AGENT_ID: "agent-1", PAPERCLIP_COMPANY_ID: "company-1",
+      PAPERCLIP_TASK_ID: "task-1", PAPERCLIP_WAKE_REASON: "issue_assigned", PAPERCLIP_WAKE_COMMENT_ID: "comment-1",
+      PAPERCLIP_WORKSPACE_CWD: ws(), PRIME_AGENT_CODING_AGENT_DIR: agentDir(), PRIME_AGENT_TELEMETRY: "0",
+    });
+    expect([env.PAPERCLIP_API_URL?.startsWith("http"), lstatSync(path.join(agentDir(), "auth.json")).isSymbolicLink()]).toEqual([true, true]);
+    expect(metas.map((meta) => [meta.adapterType, meta.commandArgs])).toEqual([["prime_agent_local", argv]]);
+    expect(metas[0]!.env?.PAPERCLIP_API_KEY).not.toBe("run-jwt-token");
+    expect(metas[0]!.env).not.toHaveProperty("LANG");
+    expect([metas[0]!.env?.DATABASE_URL, metas[0]!.env?.PRIME_AGENT_CODING_AGENT_DIR, metas[0]!.env?.HOME]).toEqual([undefined, agentDir(), path.join(root, "home")]);
+    expect(result).toEqual({
+      exitCode: 0, signal: null, timedOut: false, errorCode: null, errorMessage: null,
+      provider: "anthropic", model: "anthropic/claude-haiku-4-5", biller: "anthropic", billingType: "subscription",
+      usage: { inputTokens: 3, outputTokens: 4, cachedInputTokens: 0 }, usageBasis: "per_run", costUsd: null,
+      resultJson: { stdout: readFileSync(RUN2, "utf8"), stderr: "", cacheWriteTokens: 10553, totalTokens: 10560 },
+      sessionId: SESSION2, sessionDisplayId: SESSION2, summary: "OK", clearSession: false,
+      sessionParams: { sessionId: SESSION2, sessionFile: path.join(sessionDir(), `${SESSION2}.jsonl`), cwd: ws(), provider: "anthropic", model: "claude-haiku-4-5", agentDir: agentDir() },
+    });
+  });
+  it("passes each staged skill with --skill and removes the staging dir afterwards", async () => {
+    const skill = path.join(root, "skill-src", "paperclip-check");
+    mkdirSync(skill, { recursive: true });
+    writeFileSync(path.join(skill, "SKILL.md"), "---\nname: paperclip-check\ndescription: test skill\n---\n");
+    await run({ config: {
+      paperclipRuntimeSkills: [{ key: "local/paperclip-check", runtimeName: "paperclip-check", source: skill }],
+      paperclipSkillSync: { desiredSkills: ["local/paperclip-check"] },
+    } });
+    const argv = runCalls()[0]!.argv;
+    const staged = argv[argv.indexOf("--skill") + 1]!;
+    expect([path.basename(staged), existsSync(staged)]).toEqual(["paperclip-check", false]);
+  });
+});
