@@ -192,7 +192,7 @@ export const isPrimeUnknownSessionError: IsPrimeUnknownSessionError = (stdout, s
   const haystack = `${stdout}\n${stderr}`
     .split(/\r?\n/)
     .map((line) => line.trim())
-    .filter(Boolean)
+    .filter((line) => line && !parseEventLine(line))
     .join("\n");
   return /unknown\s+session|session\s+not\s+found|session\s+.*\s+not\s+found|no\s+session/i.test(haystack);
 };

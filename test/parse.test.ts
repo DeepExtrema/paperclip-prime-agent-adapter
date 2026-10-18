@@ -309,6 +309,19 @@ describe("isPrimeUnknownSessionError", () => {
     const stderr = run === "run1" ? readFileSync(new URL("./fixtures/prime-jsonl/run1.stderr.txt", import.meta.url), "utf8") : "";
     expect(isPrimeUnknownSessionError(fixture(run), stderr)).toBe(false);
   });
+  it("ignores session wording inside assistant and tool JSONL events", () => {
+    const assistant = jsonl({
+      type: "turn_end",
+      message: { role: "assistant", content: [{ type: "text", text: "There is no session found for this cookie." }] },
+    });
+    const tool = jsonl({
+      type: "message_end",
+      message: { role: "toolResult", toolCallId: "a", content: [{ type: "text", text: "The session file was checked. Config not found." }] },
+    });
+    expect(isPrimeUnknownSessionError(assistant, "")).toBe(false);
+    expect(isPrimeUnknownSessionError("", tool)).toBe(false);
+    expect(isPrimeUnknownSessionError(assistant, "Error: No session found matching 'x'.")).toBe(true);
+  });
   it("does not match unrelated text", () => {
     expect(isPrimeUnknownSessionError("all good", "no errors")).toBe(false);
   });
