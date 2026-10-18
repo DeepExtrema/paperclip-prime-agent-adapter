@@ -47,3 +47,23 @@ describe("session codec (INTERFACES §7)", () => {
     expect(primeSessionCodec.getDisplayId?.(null)).toBeNull();
   });
 });
+
+
+describe("session header (INTERFACES §7)", () => {
+  it("reads id and cwd from the first non-empty line when it is a session event", async () => {
+    const run2Header = '{"type":"session","version":3,"id":"01a14c2a-5965-7269-8920-97d0da73b791","timestamp":"2026-10-17T23:20:06.245Z","cwd":"/tmp/prime-local-check-we2ejug3/ws","rlmDepth":0}';
+    await expect(readPrimeSessionHeader(await scratchFile(`\n${run2Header}\n{"type":"message"}\n`))).resolves.toEqual({
+      id: "01a14c2a-5965-7269-8920-97d0da73b791",
+      cwd: "/tmp/prime-local-check-we2ejug3/ws",
+    });
+    await expect(readPrimeSessionHeader(await scratchFile('{"type":"session","id":"s-1"}\n'))).resolves.toEqual({ id: "s-1", cwd: null });
+  });
+  it("returns null for a missing file, a directory, bad JSON, an empty file, a non-session first line or a missing id", async () => {
+    const missing = await scratchFile(null);
+    await expect(readPrimeSessionHeader(missing)).resolves.toBeNull();
+    await expect(readPrimeSessionHeader(path.dirname(missing))).resolves.toBeNull();
+    for (const content of ["{not json\n", "", "\n\n", '{"type":"message","id":"s-1"}\n', '{"type":"session","id":""}\n', "[1,2]\n"]) {
+      await expect(readPrimeSessionHeader(await scratchFile(content))).resolves.toBeNull();
+    }
+  });
+});

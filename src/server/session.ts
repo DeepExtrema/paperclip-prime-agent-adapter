@@ -26,7 +26,19 @@ export const primeSessionCodec: AdapterSessionCodec = {
   getDisplayId: (params) => (params && isNonEmptyString(params.sessionId) ? params.sessionId : null),
 };
 
-export const readPrimeSessionHeader: ReadPrimeSessionHeader = async () =>
-  notImplemented("WP4", "readPrimeSessionHeader");
+export const readPrimeSessionHeader: ReadPrimeSessionHeader = async (sessionFile) => {
+  try {
+    const text = await fs.readFile(sessionFile, "utf8");
+    const line = text.split(/\r?\n/).find((line) => line.trim().length > 0);
+    if (!line) return null;
+    const raw: unknown = JSON.parse(line);
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+    const { type, id, cwd } = raw as Record<string, unknown>;
+    if (type !== "session" || !isNonEmptyString(id)) return null;
+    return { id, cwd: isNonEmptyString(cwd) ? cwd : null };
+  } catch {
+    return null;
+  }
+};
 
 export const decidePrimeResume: DecidePrimeResume = () => notImplemented("WP4", "decidePrimeResume");
