@@ -373,7 +373,7 @@ async function runAttempt(
       const error = prompted.error ?? "prompt_and_wait failed without an error text.";
       return await outcome("prompt_failed", error);
     }
-    if (native.goal !== null || native.autonomous !== null) {
+    {
       const headless = await client.request({ type: "wait_for_headless_completion", activeSessionId: sid }, null);
       autonomousStatus = headless.success ? headless.data ?? null : { error: headless.error ?? null };
       if (stopReason()) return await outcome(stopReason()!, null);

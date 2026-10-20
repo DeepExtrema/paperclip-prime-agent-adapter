@@ -10,6 +10,7 @@ import type { CreateConfigValues } from "@paperclipai/adapter-utils";
 import { getPrimeConfigSchema } from "../src/server/config-schema.js";
 import { buildPrimeLocalConfig } from "../src/ui/build-config.js";
 import { execute } from "../src/server/execute.js";
+import { primeSessionCodec } from "../src/server/session.js";
 const FAKE = fileURLToPath(new URL("./fake-prime-daemon.mjs", import.meta.url));
 const FAKE_PRINT = fileURLToPath(new URL("./fake-prime-agent.mjs", import.meta.url));
 const fixture = (name: string) => fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url));
@@ -201,6 +202,23 @@ async function cancelRun(hard = false, ignoreTerm = false) {
   return await pending;
 }
 describe("daemon per run", () => {
+  it("waits for a late child reply even without goal or autonomous mode", async () => {
+    const { result } = await run({ env: { FAKE_DAEMON_LATE_CHILD: "1" } });
+    expect(result).toMatchObject({ exitCode: 0, summary: "CHILD SAID KESTREL-4" });
+    expect(types()[types().indexOf("prompt_and_wait") + 1]).toBe("wait_for_headless_completion");
+  });
+  it("returns the same persisted session shape as print and resumes it through the codec", async () => {
+    const printed = await run({ config: { runtime: "print", command: FAKE_PRINT }, env: { FAKE_PRIME_STDOUT_FILE: RUN2 } });
+    const first = await run();
+    expect(first.result.sessionParams).not.toBeNull(); expect(first.result.sessionParams).toBeDefined();
+    expect(Object.keys(first.result.sessionParams!).sort()).toEqual(Object.keys(printed.result.sessionParams!).sort());
+    const saved = primeSessionCodec.serialize(first.result.sessionParams!);
+    expect(saved).toEqual(first.result.sessionParams);
+    const second = await run({ runId: "run-2", sessionParams: primeSessionCodec.deserialize(saved)! });
+    expect(second.result.sessionId).toBe(first.result.sessionId);
+    expect(second.result.sessionParams!.sessionId).toBe(first.result.sessionParams!.sessionId);
+  });
+
   it("defaults native config to print and rejects goal without daemon", () => {
     expect(resolvePrimeNativeConfig({})).toEqual({ runtime: "print", goal: null, autonomous: null, rlmMaxDepth: null, subagentDefaultModel: null });
     expect(() => resolvePrimeNativeConfig({ goal: "x" })).toThrow('adapterConfig.goal and adapterConfig.autonomous need runtime "daemon".');
@@ -240,7 +258,7 @@ describe("daemon per run", () => {
     expect(result).toMatchObject({ exitCode: 0, errorCode: null, summary: "OK", clearSession: false,
       usage: { inputTokens: 3, outputTokens: 4, cachedInputTokens: 0 }, usageBasis: "per_run",
       resultJson: { runtime: "daemon", sessionStatsDelta: { input: 3, output: 4, cacheRead: 0, cacheWrite: 10553, total: 10560, cost: 0 } } });
-    expect(types()).toEqual(["create", "attach", "get_session_stats", "prompt_and_wait", "get_last_assistant_text", "get_session_stats", "shutdown"]);
+    expect(types()).toEqual(["create", "attach", "get_session_stats", "prompt_and_wait", "wait_for_headless_completion", "get_last_assistant_text", "get_session_stats", "shutdown"]);
     const params = result.sessionParams as Record<string, string>;
     expect(params.sessionFile).toBe(path.join(sessionDir(), `${params.sessionId}.jsonl`));
     expect(params.agentDir).toBe(agentDir());

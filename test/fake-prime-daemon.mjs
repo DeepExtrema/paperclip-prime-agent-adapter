@@ -114,6 +114,10 @@ async function handle(socket, id, command) {
     case "get_last_assistant_text": return ok({ text: s.last });
     case "wait_for_headless_completion": {
       if (env.FAKE_DAEMON_HEADLESS_ERROR) return fail(env.FAKE_DAEMON_HEADLESS_ERROR);
+      if (env.FAKE_DAEMON_LATE_CHILD) {
+        const message = { role: "assistant", content: [{ type: "text", text: "CHILD SAID KESTREL-4" }], stopReason: "stop" };
+        emit(s, { type: "message_end", message }); emit(s, { type: "agent_end", messages: [message] }); s.last = "CHILD SAID KESTREL-4";
+      }
       const a = s.config.autonomous ?? {};
       return ok({ enabled: a.enabled === true, continuationsUsed: 0, turnsUsed: 1, tokensUsed: s.stats.total,
         limits: { maxContinuations: a.maxContinuations ?? 3, maxTurns: a.maxTurns ?? 12, maxTokens: a.maxTokens ?? 80000, timeoutMs: a.timeoutMs ?? 1800000 },

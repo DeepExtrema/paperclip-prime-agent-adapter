@@ -446,42 +446,52 @@ async function scenarios(plan, check) {
 async function daemonScenarios(plan, check, cid) {
   const adapterConfig = { command: plan.args.primeCommand, model: MODEL, thinking: "off", cwd: plan.workspace, timeoutSec: 600,
     runtime: "daemon", rlmMaxDepth: 1, subagentDefaultModel: MODEL };
-  const coordinator = await api(plan, "POST", `/companies/${cid}/agents`, {
-    name: "Coordinator", role: "ceo", adapterType: "prime_agent_local", adapterConfig,
+  const specialist = await api(plan, "POST", `/companies/${cid}/agents`, {
+    name: "Specialist", role: "engineer", adapterType: "prime_agent_local", adapterConfig,
     runtimeConfig: { heartbeat: { enabled: false, maxConcurrentRuns: 1 } },
   });
-  writeJson(plan, "agents.json", { coordinator });
-  await setInstructions(plan, coordinator.id, [...HEADER,
+  writeJson(plan, "agents.json", { specialist });
+  await setInstructions(plan, specialist.id, [...HEADER,
     "Step 2. Run this code once:", "```python",
     "import inspect",
     "async def call(x): return await x if inspect.isawaitable(x) else x",
     'found = await call(rlm.harness.search("proof codeword", kind="memory", global_=True))',
     "print(found)", "```",
-    "If an entry was found: reply MEMORY SAYS plus its content and stop.",
+    "If an entry was found: reply MEMORY SAYS plus its full content (including the child word stored there) and stop.",
     "Step 3. Run this code once:", "```python",
     'h = await rlm.spawn("Reply with only this: the word KESTREL, a hyphen, then the number four as a digit.", name="proof-child", model="anthropic/claude-haiku-4-5")',
     "print(await rlm.collect(timeout_ms=180000))", "```",
-    "Step 4. Run this code once:", "```python",
-    'await call(rlm.harness.create_memory("proof codeword", "The proof codeword is OSPREY-9.", global_=True))',
+    "If collect says running, end this turn with WAITING FOR CHILD. Do not run Step 4 or invent a child answer. When the child reply arrives, continue at Step 4, not Step 2.",
+    "Step 4. Only after receiving the actual child reply: set child_word to its exact reply text in Python, then run:", "```python",
+    'await call(rlm.harness.create_memory("proof codeword", "The proof codeword is OSPREY-9. The child word is " + child_word, global_=True))',
     "print(pc('POST', '/api/companies/' + os.environ['PAPERCLIP_COMPANY_ID'] + '/issues', {'title': 'Daemon proof ' + os.environ['PAPERCLIP_RUN_ID'], 'status': 'todo'}))",
     "```", "Reply CHILD SAID plus the child's word and stop.",
   ].join("\n"));
+  const issue = await api(plan, "POST", `/companies/${cid}/issues`, {
+    title: "Daemon specialist proof", description: "Follow the daemon proof instructions: spawn a child, use its actual reply, and store memory. On the next run recall both memory and child word. Do not change issue status or post comments.",
+    status: "todo", assigneeAgentId: specialist.id,
+  });
+  writeJson(plan, "proof-issue.json", issue);
   const runs = [];
   for (const label of ["d1", "d2"]) {
-    const wake = await api(plan, "POST", `/agents/${coordinator.id}/wakeup`, { source: "on_demand", triggerDetail: "manual", reason: `daemon-${label}` });
+    const wake = label === "d1"
+      ? await waitIssueRun(plan, cid, specialist.id, issue.id, 180000)
+      : await api(plan, "POST", `/agents/${specialist.id}/wakeup`, { source: "on_demand", triggerDetail: "manual", reason: "daemon-d2", payload: { issueId: issue.id } });
+    if (!wake) throw new Error("Specialist issue run did not start.");
     const run = await waitRun(plan, wake.id, 600000);
     await collectRun(plan, label, run); runs.push(run);
     const out = spawnSync("pgrep", ["-af", "--", "--mode daemon"], { env: plan.env, encoding: "utf8" });
     fs.writeFileSync(path.join(plan.evidence, `pgrep-after-${label}.txt`), out.stdout);
     check(`(d) no daemon after ${label.toUpperCase()}`, !out.stdout.split("\n").some(line => line.includes(plan.root)), "");
-    writeJson(plan, `sessions-${label}.json`, await api(plan, "GET", `/agents/${coordinator.id}/runtime-state`));
+    const sessions = await api(plan, "GET", `/agents/${specialist.id}/task-sessions`);
+    writeJson(plan, `sessions-${label}.json`, sessions.filter(session => session.taskKey === issue.id));
   }
   const params = runs.map((run, i) => findSessionParams(run)[0] ?? findSessionParams(JSON.parse(fs.readFileSync(path.join(plan.evidence, `sessions-d${i + 1}.json`), "utf8")))[0]);
   const text = label => fs.readFileSync(path.join(plan.evidence, `run-${label}.json`), "utf8") + fs.readFileSync(path.join(plan.evidence, `run-${label}-log.json`), "utf8");
   const files = dir => fs.readdirSync(dir, { withFileTypes: true }).flatMap(entry => entry.isDirectory() ? files(path.join(dir, entry.name)) : entry.isFile() ? [path.join(dir, entry.name)] : []);
   const child = params[0] && files(params[0].agentDir).find(file => file.endsWith(".jsonl") && file !== params[0].sessionFile && fs.readFileSync(file, "utf8").includes("KESTREL-4"));
   check("(a) D1 succeeded and used the child's reply", runs[0].status === "succeeded" && text("d1").includes("CHILD SAID KESTREL-4") && Boolean(child), child ?? "no child session");
-  check("(b) D2 resumed the D1 session and recalled the memory", runs[1].status === "succeeded" && params[0]?.sessionId === params[1]?.sessionId && text("d2").includes("MEMORY SAYS") && text("d2").includes("OSPREY-9") && text("d2").includes("harness.search"), JSON.stringify(params));
+  check("(b) D2 resumed the D1 session and recalled the memory", runs[1].status === "succeeded" && Boolean(params[0]?.sessionId) && Boolean(params[1]?.sessionId) && params[0].sessionId === params[1].sessionId && runs[1].sessionIdAfter === runs[0].sessionIdAfter && text("d2").includes("MEMORY SAYS") && text("d2").includes("OSPREY-9") && text("d2").includes("harness.search") && text("d2").includes("KESTREL-4"), JSON.stringify(params));
   const issues = await api(plan, "GET", `/companies/${cid}/issues`);
   writeJson(plan, "issues.json", issues);
   check("(c) D1 created its issue with its own run key", issues.filter(issue => issue.title === `Daemon proof ${runs[0].id}`).length === 1, "");
