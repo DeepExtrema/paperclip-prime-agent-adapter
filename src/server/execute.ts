@@ -10,6 +10,7 @@ import {
   resolvePaperclipInstanceRootForAdapter, runChildProcess, selectInitialCommunicationGuidance, selectPaperclipPromptSections,
   type RunProcessResult,
 } from "@paperclipai/adapter-utils/server-utils";
+import { executeDaemon, resolvePrimeNativeConfig, type PrimeNativeConfig } from "./execute-daemon.js";
 import { PrimeCliError } from "../errors.js";
 import {
   PRIME_ADAPTER_TYPE, PRIME_SUPPORTED_VERSION_RANGE, type BuildPrimeArgs, type ParsedPrimeOutput, type PrimeRuntimeConfig,
@@ -35,12 +36,12 @@ export const buildPrimeArgs: BuildPrimeArgs = (input) => {
   return args;
 };
 /** childEnv: §16 A8, stripped inherited keys are present as undefined; it reaches runChildProcess unchanged. paperclipEnv: A18 onMeta keys. */
-type PreparedRun = {
+export type PreparedRun = {
   runtime: PrimeRuntimeConfig; cwd: string; paperclipEnv: Record<string, string>; childEnv: Record<string, string | undefined>;
   seeded: SeededPrimeAgentDir; skills: StagedPrimeSkills; deadlineMs: number | null;
 };
 type Attempt = { proc: RunProcessResult; parsed: ParsedPrimeOutput };
-type SystemPrompt = { text: string; notes: string[]; ownsDefaultPolicy: boolean };
+export type SystemPrompt = { text: string; notes: string[]; ownsDefaultPolicy: boolean };
 const firstNonEmptyLine = (text: string) => text.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? "";
 const nonEmpty = (value: unknown) => (typeof value === "string" && value.trim().length > 0 ? value.trim() : null);
 /** pi-local execute.ts 247-331: cwd and the Paperclip run env. */
@@ -227,7 +228,7 @@ function mapResult(attempt: Attempt, prep: PreparedRun, clearSession: boolean): 
   const session = sessionParams ? { sessionId, sessionParams: { ...sessionParams }, sessionDisplayId: sessionId } : {};
   return { ...base, exitCode: 0, errorCode: null, errorMessage: null, ...session, summary: parsed.finalMessage };
 }
-async function runPrime(ctx: AdapterExecutionContext, prep: PreparedRun): Promise<AdapterExecutionResult> {
+async function runPrime(ctx: AdapterExecutionContext, prep: PreparedRun, native: PrimeNativeConfig): Promise<AdapterExecutionResult> {
   const { runtime, cwd } = prep;
   const system = await buildSystemPrompt(ctx, runtime, cwd);
   const notes = [...prep.seeded.notes, ...system.notes];
@@ -245,6 +246,8 @@ async function runPrime(ctx: AdapterExecutionContext, prep: PreparedRun): Promis
     );
   }
   const resumeSessionFile = decision.resume ? decision.sessionFile : null;
+  if (native.runtime === "daemon") return await executeDaemon({ ctx, prep, native, system, notes, resumeSessionFile,
+    userPrompt: (resumed) => buildUserPrompt(ctx, runtime, system.ownsDefaultPolicy, resumed) });
   const first = await runAttempt(ctx, prep, system, notes, resumeSessionFile);
   const firstFailed = !first.proc.timedOut && (first.proc.exitCode !== 0 || first.parsed.errors.length > 0);
   if (saved && resumeSessionFile !== null && firstFailed && isPrimeUnknownSessionError(first.proc.stdout, first.proc.stderr)) {
@@ -256,14 +259,16 @@ async function runPrime(ctx: AdapterExecutionContext, prep: PreparedRun): Promis
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
   const startedAtMs = Date.now();
   let prep: PreparedRun;
+  let native: PrimeNativeConfig;
   try {
+    native = resolvePrimeNativeConfig(ctx.config);
     prep = await prepareRun(ctx, startedAtMs);
   } catch (err) {
     return preflightFailure(err);
   }
   try {
     await ctx.onCancellationReady?.(); // A18: the host registers the execution control here
-    return await runPrime(ctx, prep);
+    return await runPrime(ctx, prep, native);
   } catch (err) {
     if (err instanceof RunCancelledError) return cancelledResult(err.message);
     throw err;

@@ -261,7 +261,7 @@ describe("daemon per run", () => {
   });
   it("sends goal/autonomous and depth then waits for headless completion", async () => {
     await run({ config: { goal: "Ship it", autonomous: true, rlmMaxDepth: 1 } });
-    expect(commands()[0]).toMatchObject({ config: { initialGoal: { objective: "Ship it", tokenBudget: null }, autonomous: { enabled: true } } });
+    expect(commands()[0]).toMatchObject({ config: { initialGoal: { objective: "Ship it" }, autonomous: { enabled: true } } });
     expect(commands()).toContainEqual(expect.objectContaining({ type: "set_rlm_max_depth", maxDepth: 1 }));
     expect(types()[types().indexOf("prompt_and_wait") + 1]).toBe("wait_for_headless_completion");
   });

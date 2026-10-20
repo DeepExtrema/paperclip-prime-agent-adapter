@@ -39,6 +39,12 @@ function parseArgs(argv) {
       args.printPlan = true;
       continue;
     }
+    if (argv[i] === "--runtime") {
+      const value = argv[++i];
+      if (value !== "daemon") die(`--runtime must be daemon: ${value}`);
+      args.runtime = value;
+      continue;
+    }
     const key = FLAGS[argv[i]];
     if (!key || i + 1 >= argv.length) die(`unknown or incomplete argument: ${argv[i]}`);
     args[key] = argv[(i += 1)];
@@ -215,8 +221,7 @@ function processesUnder(root) {
   return found;
 }
 
-function instructions(role, specialistId) {
-  const header = [
+const HEADER = [
     "# WP7 smoke agent",
     "",
     "You are a test agent in a throwaway Paperclip company. Do exactly these steps and nothing else.",
@@ -236,6 +241,8 @@ function instructions(role, specialistId) {
     "```",
     "",
   ];
+
+function instructions(role, specialistId) {
   const noTask = role === "coordinator"
     ? [
         "Step 2. If Step 1 printed '' (no task): run this code once, then reply CREATED and stop:",
@@ -254,7 +261,7 @@ function instructions(role, specialistId) {
     "```",
     "",
   ];
-  return [...header, ...noTask, ...task].join("\n");
+  return [...HEADER, ...noTask, ...task].join("\n");
 }
 
 async function setInstructions(plan, agentId, content) {
@@ -347,6 +354,8 @@ async function scenarios(plan, check) {
   writeJson(plan, "models.json", models);
   check("model list includes the smoke model", JSON.stringify(models).includes(`"${MODEL}"`), MODEL);
 
+  if (plan.args.runtime === "daemon") return await daemonScenarios(plan, check, cid);
+
   const adapterConfig = { command: plan.args.primeCommand, model: MODEL, thinking: "off", cwd: plan.workspace, timeoutSec: 600 };
   const runtimeConfig = { heartbeat: { enabled: false, maxConcurrentRuns: 1 } };
   const coordinator = await api(plan, "POST", `/companies/${cid}/agents`, {
@@ -432,6 +441,53 @@ async function scenarios(plan, check) {
   const controlAfter = await api(plan, "GET", `/agents/${control.id}`);
   check("control agent unchanged (L15)", controlAfter.adapterType === control.adapterType
     && JSON.stringify(controlAfter.adapterConfig) === JSON.stringify(control.adapterConfig), controlAfter.adapterType);
+}
+
+async function daemonScenarios(plan, check, cid) {
+  const adapterConfig = { command: plan.args.primeCommand, model: MODEL, thinking: "off", cwd: plan.workspace, timeoutSec: 600,
+    runtime: "daemon", rlmMaxDepth: 1, subagentDefaultModel: MODEL };
+  const coordinator = await api(plan, "POST", `/companies/${cid}/agents`, {
+    name: "Coordinator", role: "ceo", adapterType: "prime_agent_local", adapterConfig,
+    runtimeConfig: { heartbeat: { enabled: false, maxConcurrentRuns: 1 } },
+  });
+  writeJson(plan, "agents.json", { coordinator });
+  await setInstructions(plan, coordinator.id, [...HEADER,
+    "Step 2. Run this code once:", "```python",
+    "import inspect",
+    "async def call(x): return await x if inspect.isawaitable(x) else x",
+    'found = await call(rlm.harness.search("proof codeword", kind="memory", global_=True))',
+    "print(found)", "```",
+    "If an entry was found: reply MEMORY SAYS plus its content and stop.",
+    "Step 3. Run this code once:", "```python",
+    'h = await rlm.spawn("Reply with only this: the word KESTREL, a hyphen, then the number four as a digit.", name="proof-child", model="anthropic/claude-haiku-4-5")',
+    "print(await rlm.collect(timeout_ms=180000))", "```",
+    "Step 4. Run this code once:", "```python",
+    'await call(rlm.harness.create_memory("proof codeword", "The proof codeword is OSPREY-9.", global_=True))',
+    "print(pc('POST', '/api/companies/' + os.environ['PAPERCLIP_COMPANY_ID'] + '/issues', {'title': 'Daemon proof ' + os.environ['PAPERCLIP_RUN_ID'], 'status': 'todo'}))",
+    "```", "Reply CHILD SAID plus the child's word and stop.",
+  ].join("\n"));
+  const runs = [];
+  for (const label of ["d1", "d2"]) {
+    const wake = await api(plan, "POST", `/agents/${coordinator.id}/wakeup`, { source: "on_demand", triggerDetail: "manual", reason: `daemon-${label}` });
+    const run = await waitRun(plan, wake.id, 600000);
+    await collectRun(plan, label, run); runs.push(run);
+    const out = spawnSync("pgrep", ["-af", "--", "--mode daemon"], { env: plan.env, encoding: "utf8" });
+    fs.writeFileSync(path.join(plan.evidence, `pgrep-after-${label}.txt`), out.stdout);
+    check(`(d) no daemon after ${label.toUpperCase()}`, !out.stdout.split("\n").some(line => line.includes(plan.root)), "");
+    writeJson(plan, `sessions-${label}.json`, await api(plan, "GET", `/agents/${coordinator.id}/runtime-state`));
+  }
+  const params = runs.map((run, i) => findSessionParams(run)[0] ?? findSessionParams(JSON.parse(fs.readFileSync(path.join(plan.evidence, `sessions-d${i + 1}.json`), "utf8")))[0]);
+  const text = label => fs.readFileSync(path.join(plan.evidence, `run-${label}.json`), "utf8") + fs.readFileSync(path.join(plan.evidence, `run-${label}-log.json`), "utf8");
+  const files = dir => fs.readdirSync(dir, { withFileTypes: true }).flatMap(entry => entry.isDirectory() ? files(path.join(dir, entry.name)) : entry.isFile() ? [path.join(dir, entry.name)] : []);
+  const child = params[0] && files(params[0].agentDir).find(file => file.endsWith(".jsonl") && file !== params[0].sessionFile && fs.readFileSync(file, "utf8").includes("KESTREL-4"));
+  check("(a) D1 succeeded and used the child's reply", runs[0].status === "succeeded" && text("d1").includes("CHILD SAID KESTREL-4") && Boolean(child), child ?? "no child session");
+  check("(b) D2 resumed the D1 session and recalled the memory", runs[1].status === "succeeded" && params[0]?.sessionId === params[1]?.sessionId && text("d2").includes("MEMORY SAYS") && text("d2").includes("OSPREY-9") && text("d2").includes("harness.search"), JSON.stringify(params));
+  const issues = await api(plan, "GET", `/companies/${cid}/issues`);
+  writeJson(plan, "issues.json", issues);
+  check("(c) D1 created its issue with its own run key", issues.filter(issue => issue.title === `Daemon proof ${runs[0].id}`).length === 1, "");
+  writeJson(plan, "cost-events.json", sql(plan, `select heartbeat_run_id, agent_id, provider, model, biller, billing_type, input_tokens, cached_input_tokens, output_tokens, cost_cents, cost_status from cost_events where company_id = '${cid}' order by occurred_at`));
+  writeJson(plan, "proof-session-params.json", params);
+  writeJson(plan, "proof-child-session.json", { file: child ?? null });
 }
 
 async function live(plan) {

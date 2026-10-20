@@ -10,6 +10,10 @@ describe("getPrimeConfigSchema", () => {
     expect(getPrimeConfigSchema().fields.map((f) => [f.key, f.type])).toEqual([
       ["credentialMode", "select"], ["apiKeyEnvVar", "text"], ["thinking", "select"],
       ["appendSystemPrompt", "textarea"], ["noContextFiles", "toggle"], ["agentDirRoot", "text"],
+      ["runtime", "select"], ["goal", "textarea"], ["goalTokenBudget", "text"], ["autonomous", "toggle"],
+      ["autonomousMaxTurns", "text"], ["autonomousMaxTokens", "text"], ["autonomousMaxContinuations", "text"],
+      ["autonomousTimeoutMs", "text"], ["autonomousGates", "textarea"], ["autonomousGateRetries", "text"],
+      ["autonomousGateTimeoutMs", "text"], ["rlmMaxDepth", "text"], ["subagentDefaultModel", "text"],
     ]);
   });
   it("defaults credentialMode to host_auth and shows apiKeyEnvVar only for api_key", () => {
