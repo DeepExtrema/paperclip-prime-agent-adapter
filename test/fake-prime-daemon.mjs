@@ -1,0 +1,198 @@
+#!/usr/bin/env node
+// Test double for `prime-agent --mode daemon` 0.10.0 (WP9). It never calls a model.
+// Wire shapes copied from the 2026-10-18 probes (plans/WP9-daemon-runtime.md §0.3).
+// Also answers `--version` and `model list` like test/fake-prime-agent.mjs.
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import net from "node:net";
+import path from "node:path";
+const argv = process.argv.slice(2);
+const env = process.env;
+const record = (entry) => { if (env.FAKE_DAEMON_RECORD) appendFileSync(env.FAKE_DAEMON_RECORD, `${JSON.stringify({ pid: process.pid, ...entry })}\n`); };
+if (argv[0] === "--version") {
+  process.stdout.write(`${env.FAKE_PRIME_VERSION ?? "0.10.0"}\n`);
+  process.exit(0);
+}
+if (argv[0] === "model" && argv[1] === "list") {
+  process.stdout.write(readFileSync(env.FAKE_PRIME_MODEL_LIST, "utf8"));
+  process.exit(0);
+}
+const socketPath = argv[argv.indexOf("--daemon-socket") + 1];
+if (argv[0] !== "--mode" || argv[1] !== "daemon" || !socketPath) {
+  process.stderr.write(`fake-prime-daemon: unsupported argv ${JSON.stringify(argv)}\n`);
+  process.exit(64);
+}
+record({ kind: "start", argv, cwd: process.cwd(), env });
+if (env.FAKE_DAEMON_EXIT_AT_START === "1") {
+  process.stderr.write("fake-prime-daemon: boom at start\n");
+  process.exit(3);
+}
+if (env.FAKE_DAEMON_IGNORE_TERM === "1") process.on("SIGTERM", () => record({ kind: "sigterm_ignored" }));
+else process.on("SIGTERM", () => shutdown());
+const PROCESSING = "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.";
+const sessions = new Map();
+let nextSession = 0;
+const clients = new Set();
+const send = (socket, message) => { if (!socket.destroyed) socket.write(`${JSON.stringify(message)}\n`); };
+const eventsOf = () => (env.FAKE_DAEMON_EVENTS_FILE ? readFileSync(env.FAKE_DAEMON_EVENTS_FILE, "utf8").split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l)).filter((e) => e.type !== "session") : []);
+const usageOf = (events) => {
+  const sum = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0 };
+  for (const e of events) {
+    const u = e.type === "turn_end" && e.message?.role === "assistant" ? e.message.usage : null;
+    if (!u) continue;
+    sum.input += u.input ?? 0; sum.output += u.output ?? 0; sum.cacheRead += u.cacheRead ?? 0;
+    sum.cacheWrite += u.cacheWrite ?? 0; sum.total += u.totalTokens ?? 0; sum.cost += u.cost?.total ?? 0;
+  }
+  return sum;
+};
+const lastText = (events) => {
+  for (const e of [...events].reverse()) {
+    if (e.type === "message_end" && e.message?.role === "assistant") {
+      return (e.message.content ?? []).filter((c) => c.type === "text").map((c) => c.text).join("") || null;
+    }
+  }
+  return null;
+};
+function summary(s) {
+  return { id: s.id, activeSessionId: s.id, lifecycle: s.prompted ? "live" : "draft", activity: s.streaming ? "working" : "idle",
+    rlmDepth: 0, sessionId: s.sessionId, sessionFile: s.sessionFile, cwd: s.cwd, thinkingLevel: s.thinking,
+    model: { id: s.model, provider: s.provider }, isSessionActive: s.streaming, isStreaming: s.streaming, isCompacting: false, isBashRunning: false,
+    hasRunningSubagents: env.FAKE_DAEMON_SUBAGENTS_RUNNING === "1", attachedClients: s.clients.size, messageCount: s.messages, workerState: "ready", workerPid: process.pid };
+}
+function emit(s, event) {
+  s.seq += 1;
+  const message = { type: "session_event", activeSessionId: s.id, event, meta: { id: `${s.id}:${s.seq}`, sequence: s.seq } };
+  const wire = env.FAKE_DAEMON_ENVELOPE_EVENTS === "1" ? { type: "event", id: `${s.id}:${s.seq}`, protocol: { name: "prime-agent.daemon", version: 7 }, event: message } : message;
+  for (const c of s.clients) send(c, wire);
+}
+function create(command) {
+  const config = command.config ?? {};
+  const sessionPath = command.sessionPath;
+  for (const s of sessions.values()) if (sessionPath && s.sessionFile === sessionPath) return s;
+  let sessionId = `fake-session-${process.pid}-${++nextSession}`;
+  if (sessionPath && existsSync(sessionPath)) sessionId = JSON.parse(readFileSync(sessionPath, "utf8").split("\n")[0]).id;
+  const sessionFile = sessionPath ?? path.join(config.sessionDir, `${sessionId}.jsonl`);
+  if (!existsSync(sessionFile)) {
+    mkdirSync(path.dirname(sessionFile), { recursive: true });
+    writeFileSync(sessionFile, `${JSON.stringify({ type: "session", version: 3, id: sessionId, cwd: config.cwd, rlmDepth: 0 })}\n`);
+  }
+  const initial = JSON.parse(env.FAKE_DAEMON_INITIAL_STATS ?? '{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0,"cost":0}');
+  const s = { id: `a${process.pid.toString(16)}${++nextSession}`.slice(0, 12), sessionId, sessionFile, cwd: config.cwd, config,
+    provider: env.FAKE_DAEMON_MODEL_PROVIDER ?? config.provider ?? "anthropic", model: env.FAKE_DAEMON_MODEL_ID ?? config.model ?? "claude-opus-4-7",
+    thinking: config.thinking ?? "medium", streaming: env.FAKE_DAEMON_STREAMING_AT_START === "1", prompted: false, messages: 0, seq: 0,
+    stats: initial, last: null, clients: new Set(), pending: null, rlmMaxDepth: 2 };
+  sessions.set(s.id, s);
+  return s;
+}
+function finishPrompt(s, events) {
+  for (const e of events) emit(s, e);
+  const u = usageOf(events);
+  for (const k of Object.keys(s.stats)) s.stats[k] += u[k];
+  s.last = lastText(events) ?? s.last;
+  s.messages += events.filter((e) => e.type === "message_end").length;
+  s.streaming = false;
+}
+async function handle(socket, id, command) {
+  record({ kind: "command", command });
+  const ok = (data) => send(socket, data === undefined ? { id, type: "response", command: command.type, success: true } : { id, type: "response", command: command.type, success: true, data });
+  const fail = (error) => send(socket, { id, type: "response", command: command.type, success: false, error });
+  const s = command.activeSessionId ? sessions.get(command.activeSessionId) : undefined;
+  const needSession = !["list", "create", "shutdown"].includes(command.type);
+  if (needSession && !s) return fail(`Unknown active session: ${command.activeSessionId}`);
+  switch (command.type) {
+    case "list": return ok({ sessions: [...sessions.values()].map(summary) });
+    case "create": return ok(summary(create(command)));
+    case "attach": s.clients.add(socket); return ok({ activeSessionId: s.id, snapshot: { activeSessionId: s.id, summary: summary(s), messages: [] } });
+    case "detach": s.clients.delete(socket); return ok();
+    case "set_thinking_level": s.thinking = command.level; return ok();
+    case "set_model": s.provider = command.provider; s.model = command.modelId; return ok();
+    case "set_rlm_max_depth": s.rlmMaxDepth = command.maxDepth; return ok({ maxDepth: command.maxDepth, source: "chat", globalSaved: false });
+    case "get_session_stats": {
+      const t = s.stats;
+      return ok({ sessionFile: s.sessionFile, sessionId: s.sessionId, userMessages: 0, assistantMessages: 0, toolCalls: 0, toolResults: 0, totalMessages: s.messages,
+        tokens: { input: t.input, output: t.output, cacheRead: t.cacheRead, cacheWrite: t.cacheWrite, total: t.total }, cost: t.cost });
+    }
+    case "get_last_assistant_text": return ok({ text: s.last });
+    case "wait_for_headless_completion": {
+      if (env.FAKE_DAEMON_HEADLESS_ERROR) return fail(env.FAKE_DAEMON_HEADLESS_ERROR);
+      const a = s.config.autonomous ?? {};
+      return ok({ enabled: a.enabled === true, continuationsUsed: 0, turnsUsed: 1, tokensUsed: s.stats.total,
+        limits: { maxContinuations: a.maxContinuations ?? 3, maxTurns: a.maxTurns ?? 12, maxTokens: a.maxTokens ?? 80000, timeoutMs: a.timeoutMs ?? 1800000 },
+        gates: { commands: a.gates?.commands ?? [], maxRetries: a.gates?.maxRetries ?? 3, timeoutMs: a.gates?.timeoutMs ?? 300000 }, gateAttempts: {}, subagentKeepAliveMs: 1500000 });
+    }
+    case "prompt_and_wait": {
+      if (s.streaming) return fail(PROCESSING);
+      s.prompted = true;
+      const mode = env.FAKE_DAEMON_PROMPT_MODE ?? "ok";
+      if (mode === "busy") return fail(PROCESSING);
+      if (mode === "error") {
+        const error = env.FAKE_DAEMON_PROMPT_ERROR ?? "No API key found for anthropic.";
+        for (const e of [{ type: "agent_start" }, { type: "turn_start" }, { type: "turn_end", error }, { type: "agent_end" }]) emit(s, e);
+        return fail(error);
+      }
+      s.streaming = true;
+      if (mode === "hang" || mode === "hang_hard") {
+        emit(s, { type: "agent_start" });
+        s.pending = { ok, fail, mode };
+        return undefined;
+      }
+      setTimeout(() => { finishPrompt(s, eventsOf()); ok(); }, Number(env.FAKE_DAEMON_PROMPT_DELAY_MS ?? "0"));
+      return undefined;
+    }
+    case "abort": {
+      ok();
+      if (s.pending && s.pending.mode === "hang") {
+        const p = s.pending; s.pending = null;
+        finishPrompt(s, [{ type: "message_end", message: { role: "assistant", content: [], stopReason: "aborted" } }, { type: "agent_end", messages: [] }]);
+        p.ok();
+      }
+      return undefined;
+    }
+    case "kill": {
+      if (s.pending) { const p = s.pending; s.pending = null; p.fail(`Active session ${s.id} closed`); }
+      for (const c of s.clients) send(c, { type: "session_closed", activeSessionId: s.id, reason: "killed" });
+      sessions.delete(s.id);
+      return ok();
+    }
+    case "shutdown":
+      ok();
+      if (env.FAKE_DAEMON_IGNORE_SHUTDOWN === "1") return record({ kind: "shutdown_ignored" });
+      setImmediate(() => shutdown());
+      return undefined;
+    default: return fail(`Unknown daemon command: ${command.type}`);
+  }
+}
+const HELLO = { type: "daemon_hello", socketPath, protocol: { name: "prime-agent.daemon", version: 7 }, schemaId: "protocol-7-schema-30-8e4b17c2a9f5",
+  schemaRevision: 30, appVersion: "0.10.0", runtime: { buildId: "pa-daemon-rs-0.10.0", executablePath: process.argv[1] },
+  supervisorPid: process.pid, clientId: "fakeclient01", serverCapabilities: ["attach_snapshot", "event_sequence", "client_owned_sessions", "session_input_admission"] };
+const server = net.createServer((socket) => {
+  clients.add(socket);
+  send(socket, { ...HELLO, clientId: `fake${clients.size}` });
+  let buffer = "";
+  socket.on("data", (chunk) => {
+    buffer += chunk;
+    let index;
+    while ((index = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, index);
+      buffer = buffer.slice(index + 1);
+      if (!line.trim()) continue;
+      let message;
+      try { message = JSON.parse(line); } catch { continue; }
+      if (message.type !== "command" || message.protocol?.name !== "prime-agent.daemon" || message.protocol?.version !== 7 || typeof message.id !== "string") {
+        send(socket, { id: message.id, type: "response", command: String(message.command?.type ?? message.type), success: false, error: "Invalid daemon command envelope" });
+        continue;
+      }
+      void handle(socket, message.id, message.command);
+    }
+  });
+  socket.on("close", () => { clients.delete(socket); for (const s of sessions.values()) s.clients.delete(socket); });
+  socket.on("error", () => undefined);
+});
+function shutdown() {
+  record({ kind: "shutdown" });
+  for (const c of clients) { send(c, { type: "daemon_closing", reason: "shutdown" }); c.destroy(); }
+  server.close();
+  rmSync(socketPath, { force: true });
+  process.exit(0);
+}
+rmSync(socketPath, { force: true });
+server.listen(socketPath, () => record({ kind: "listening" }));
