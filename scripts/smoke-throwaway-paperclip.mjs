@@ -473,12 +473,21 @@ async function daemonScenarios(plan, check, cid) {
   });
   writeJson(plan, "proof-issue.json", issue);
   const runs = [];
-  for (const label of ["d1", "d2"]) {
+  for (const label of ["d1"]) {
     const wake = label === "d1"
       ? await waitIssueRun(plan, cid, specialist.id, issue.id, 180000)
       : await api(plan, "POST", `/agents/${specialist.id}/wakeup`, { source: "on_demand", triggerDetail: "manual", reason: "daemon-d2", payload: { issueId: issue.id } });
-    if (!wake) throw new Error("Specialist issue run did not start.");
-    const run = await waitRun(plan, wake.id, 600000);
+    writeJson(plan, `wake-${label}.json`, wake);
+    let runId = wake?.id;
+    if (!runId) {
+      const candidates = await api(plan, "GET", `/companies/${cid}/heartbeat-runs?agentId=${specialist.id}`);
+      const prior = new Set(runs.map(run => run.id));
+      const candidate = candidates.find(run => !prior.has(run.id) &&
+        (run.contextSnapshot?.issueId === issue.id || run.contextSnapshot?.taskId === issue.id));
+      runId = candidate?.id;
+    }
+    if (!runId) throw new Error(`Specialist wake did not provide a new issue run: ${JSON.stringify(wake)}`);
+    const run = await waitRun(plan, runId, 600000);
     await collectRun(plan, label, run); runs.push(run);
     const out = spawnSync("pgrep", ["-af", "--", "--mode daemon"], { env: plan.env, encoding: "utf8" });
     fs.writeFileSync(path.join(plan.evidence, `pgrep-after-${label}.txt`), out.stdout);
@@ -491,7 +500,11 @@ async function daemonScenarios(plan, check, cid) {
   const files = dir => fs.readdirSync(dir, { withFileTypes: true }).flatMap(entry => entry.isDirectory() ? files(path.join(dir, entry.name)) : entry.isFile() ? [path.join(dir, entry.name)] : []);
   const child = params[0] && files(params[0].agentDir).find(file => file.endsWith(".jsonl") && file !== params[0].sessionFile && fs.readFileSync(file, "utf8").includes("KESTREL-4"));
   check("(a) D1 succeeded and used the child's reply", runs[0].status === "succeeded" && text("d1").includes("CHILD SAID KESTREL-4") && Boolean(child), child ?? "no child session");
-  check("(b) D2 resumed the D1 session and recalled the memory", runs[1].status === "succeeded" && Boolean(params[0]?.sessionId) && Boolean(params[1]?.sessionId) && params[0].sessionId === params[1].sessionId && runs[1].sessionIdAfter === runs[0].sessionIdAfter && text("d2").includes("MEMORY SAYS") && text("d2").includes("OSPREY-9") && text("d2").includes("harness.search") && text("d2").includes("KESTREL-4"), JSON.stringify(params));
+  // Owner-authorized single-run proof: D2 is deliberately not started.
+  check("six session params persisted for the issue", Boolean(params[0]) &&
+    ["sessionId", "sessionFile", "cwd", "provider", "model", "agentDir"].every(key => typeof params[0][key] === "string" && params[0][key].length > 0), JSON.stringify(params));
+  const memoryFiles = params[0] ? files(params[0].agentDir).filter(file => file.endsWith(".json") && file.includes("harness")) : [];
+  check("D1 wrote the proof memory", memoryFiles.some(file => fs.readFileSync(file, "utf8").includes("OSPREY-9")), JSON.stringify(memoryFiles));
   const issues = await api(plan, "GET", `/companies/${cid}/issues`);
   writeJson(plan, "issues.json", issues);
   check("(c) D1 created its issue with its own run key", issues.filter(issue => issue.title === `Daemon proof ${runs[0].id}`).length === 1, "");

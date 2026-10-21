@@ -202,6 +202,23 @@ async function cancelRun(hard = false, ignoreTerm = false) {
   return await pending;
 }
 describe("daemon per run", () => {
+  it("keeps the daemon until a delayed child reply and parent follow-up settle", async () => {
+    const { result } = await run({ config: { timeoutSec: 5 }, env: { FAKE_DAEMON_DELAYED_CHILD: "1" } });
+    expect(result).toMatchObject({ exitCode: 0, summary: "CHILD SAID KESTREL-4" });
+    expect(types().filter(type => type === "list").length).toBeGreaterThan(1); gone(starts()[0]!.pid);
+  });
+  it("does not poll or delay a plain run with no running children", async () => {
+    const { result } = await run(); expect(result.exitCode).toBe(0);
+    expect(types().filter(type => type === "list")).toHaveLength(1);
+    expect(types().slice(-4)).toEqual(["list", "get_last_assistant_text", "get_session_stats", "shutdown"]);
+  });
+  it("reports a child that remains running until timeout without claiming success", async () => {
+    const { result } = await run({ config: { timeoutSec: 0.5, graceSec: 0.2 }, env: { FAKE_DAEMON_DELAYED_CHILD: "hang" } });
+    expect(result).toMatchObject({ timedOut: true, errorCode: "prime_run_timeout" });
+    expect(result.errorMessage).toContain("children still running at timeout");
+    expect(result.errorMessage).toContain("OK"); gone(starts()[0]!.pid);
+  });
+
   it("waits for a late child reply even without goal or autonomous mode", async () => {
     const { result } = await run({ env: { FAKE_DAEMON_LATE_CHILD: "1" } });
     expect(result).toMatchObject({ exitCode: 0, summary: "CHILD SAID KESTREL-4" });
@@ -258,7 +275,7 @@ describe("daemon per run", () => {
     expect(result).toMatchObject({ exitCode: 0, errorCode: null, summary: "OK", clearSession: false,
       usage: { inputTokens: 3, outputTokens: 4, cachedInputTokens: 0 }, usageBasis: "per_run",
       resultJson: { runtime: "daemon", sessionStatsDelta: { input: 3, output: 4, cacheRead: 0, cacheWrite: 10553, total: 10560, cost: 0 } } });
-    expect(types()).toEqual(["create", "attach", "get_session_stats", "prompt_and_wait", "wait_for_headless_completion", "get_last_assistant_text", "get_session_stats", "shutdown"]);
+    expect(types()).toEqual(["create", "attach", "get_session_stats", "prompt_and_wait", "wait_for_headless_completion", "list", "get_last_assistant_text", "get_session_stats", "shutdown"]);
     const params = result.sessionParams as Record<string, string>;
     expect(params.sessionFile).toBe(path.join(sessionDir(), `${params.sessionId}.jsonl`));
     expect(params.agentDir).toBe(agentDir());

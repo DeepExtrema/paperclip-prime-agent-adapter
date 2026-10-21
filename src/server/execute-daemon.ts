@@ -310,7 +310,6 @@ async function runAttempt(
     const reason = stopReason();
     if (reason) {
       stage = reason;
-      error = null;
     } else if (stage === "completed" && terminalSessionError !== null) {
       stage = "closed";
       error = `${terminalSessionError} Daemon stderr: ${daemon.stderrTail}`;
@@ -379,6 +378,23 @@ async function runAttempt(
       if (stopReason()) return await outcome(stopReason()!, null);
       if (!headless.success) return await outcome("prompt_failed", headless.error ?? "wait_for_headless_completion failed without an error text.");
     }
+    for (;;) {
+      const listed = await client.request({ type: "list" }, 30_000);
+      const rows = listed.success && isObject(listed.data) && Array.isArray(listed.data.sessions) ? listed.data.sessions.filter(isObject) : null;
+      if (!rows) return await outcome("closed", listed.error ?? "Unexpected daemon list response.");
+      const parent = rows.find(row => row.activeSessionId === sid);
+      if (!parent) return await outcome("closed", "Parent session missing from daemon list.");
+      const actions = isObject(parent.sessionActions) ? parent.sessionActions : {};
+      const childrenPending = parent.hasRunningSubagents === true;
+      const busy = childrenPending || parent.isSessionActive === true || parent.isStreaming === true || parent.isRunningTools === true || parent.isBashRunning === true || Number(actions.queuedCount ?? 0) > 0;
+      if (stopReason()) {
+        const last = await client.request({ type: "get_last_assistant_text", activeSessionId: sid }, 1000).catch(() => null);
+        const text = last?.success && isObject(last.data) ? str(last.data.text) : null;
+        return await outcome(stopReason()!, `${text ?? ""}${childrenPending ? " children still running at timeout" : ""}`.trim());
+      }
+      if (!busy) break;
+      await delay(50);
+    }
     const last = await client.request({ type: "get_last_assistant_text", activeSessionId: sid }, 30_000);
     const after = readStats(await client.request({ type: "get_session_stats", activeSessionId: sid }, 30_000));
     const lastText = last.success && isObject(last.data) ? str(last.data.text) : null;
@@ -400,7 +416,7 @@ function mapResult(o: Outcome, prep: PreparedRun, daemon: RunDaemon, clearSessio
       activeSessionId: o.session?.activeSessionId ?? null, sessionStatsDelta: usage, parsedUsage: o.parsed.usage,
       autonomousStatus: o.autonomousStatus, cacheWriteTokens: usage?.cacheWrite ?? null, totalTokens: usage?.total ?? null, }, clearSession, };
   const fail = (errorCode: string, errorMessage: string): AdapterExecutionResult => ({ ...base, errorCode, errorMessage }); switch (o.stage) {
-    case "timed_out": return { ...fail("prime_run_timeout", `Timed out after ${runtime.timeoutSec}s`), exitCode: null, timedOut: true };
+    case "timed_out": return { ...fail("prime_run_timeout", `Timed out after ${runtime.timeoutSec}s${o.error ? `: ${o.error}` : ""}`), exitCode: null, timedOut: true };
     case "cancelled": return fail("prime_run_cancelled", "Run cancelled.");
     case "closed": return fail("prime_run_uncertain", `Prime daemon connection lost; the run outcome is uncertain. ${o.error}`); case "create_failed":
     case "prompt_failed": return fail("prime_run_failed", o.error ?? "Prime daemon run failed."); case "completed": break; }

@@ -56,7 +56,7 @@ function summary(s) {
   return { id: s.id, activeSessionId: s.id, lifecycle: s.prompted ? "live" : "draft", activity: s.streaming ? "working" : "idle",
     rlmDepth: 0, sessionId: s.sessionId, sessionFile: s.sessionFile, cwd: s.cwd, thinkingLevel: s.thinking,
     model: { id: s.model, provider: s.provider }, isSessionActive: s.streaming, isStreaming: s.streaming, isCompacting: false, isBashRunning: false,
-    hasRunningSubagents: env.FAKE_DAEMON_SUBAGENTS_RUNNING === "1", attachedClients: s.clients.size, messageCount: s.messages, workerState: "ready", workerPid: process.pid };
+    hasRunningSubagents: s.childRunning || env.FAKE_DAEMON_SUBAGENTS_RUNNING === "1", attachedClients: s.clients.size, messageCount: s.messages, workerState: "ready", workerPid: process.pid };
 }
 function emit(s, event) {
   s.seq += 1;
@@ -139,7 +139,20 @@ async function handle(socket, id, command) {
         s.pending = { ok, fail, mode };
         return undefined;
       }
-      setTimeout(() => { finishPrompt(s, eventsOf()); ok(); }, Number(env.FAKE_DAEMON_PROMPT_DELAY_MS ?? "0"));
+      setTimeout(() => {
+        finishPrompt(s, eventsOf());
+        if (env.FAKE_DAEMON_DELAYED_CHILD) {
+          s.childRunning = true;
+          if (env.FAKE_DAEMON_DELAYED_CHILD !== "hang") setTimeout(() => {
+            s.childRunning = false; s.streaming = true;
+            setTimeout(() => {
+              const message = { role: "assistant", content: [{ type: "text", text: "CHILD SAID KESTREL-4" }], stopReason: "stop" };
+              finishPrompt(s, [{ type: "message_end", message }, { type: "agent_end", messages: [message] }]);
+            }, 200);
+          }, 2000);
+        }
+        ok();
+      }, Number(env.FAKE_DAEMON_PROMPT_DELAY_MS ?? "0"));
       return undefined;
     }
     case "abort": {
