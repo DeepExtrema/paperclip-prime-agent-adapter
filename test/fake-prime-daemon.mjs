@@ -4,6 +4,7 @@
 // Also answers `--version` and `model list` like test/fake-prime-agent.mjs.
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
+import { spawn } from "node:child_process";
 import path from "node:path";
 const argv = process.argv.slice(2);
 const env = process.env;
@@ -22,6 +23,10 @@ if (argv[0] !== "--mode" || argv[1] !== "daemon" || !socketPath) {
   process.exit(64);
 }
 record({ kind: "start", argv, cwd: process.cwd(), env });
+if (env.FAKE_DAEMON_WORKER) {
+  const worker = spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"], { detached: true, stdio: "ignore" });
+  record({ kind: "worker", workerPid: worker.pid });
+}
 if (env.FAKE_DAEMON_EXIT_AT_START === "1") {
   process.stderr.write("fake-prime-daemon: boom at start\n");
   process.exit(3);
@@ -95,11 +100,12 @@ async function handle(socket, id, command) {
   record({ kind: "command", command });
   const ok = (data) => send(socket, data === undefined ? { id, type: "response", command: command.type, success: true } : { id, type: "response", command: command.type, success: true, data });
   const fail = (error) => send(socket, { id, type: "response", command: command.type, success: false, error });
+  if (command.type === env.FAKE_DAEMON_REFUSE) return fail(`${command.type} refused`);
   const s = command.activeSessionId ? sessions.get(command.activeSessionId) : undefined;
   const needSession = !["list", "create", "shutdown"].includes(command.type);
   if (needSession && !s) return fail(`Unknown active session: ${command.activeSessionId}`);
   switch (command.type) {
-    case "list": return ok({ sessions: [...sessions.values()].map(summary) });
+    case "list": return env.FAKE_DAEMON_BAD_ROSTER ? ok({ sessions: null }) : ok({ sessions: [...sessions.values()].map(summary) });
     case "create": return ok(summary(create(command)));
     case "attach": s.clients.add(socket); return ok({ activeSessionId: s.id, snapshot: { activeSessionId: s.id, summary: summary(s), messages: [] } });
     case "detach": s.clients.delete(socket); return ok();
@@ -107,6 +113,7 @@ async function handle(socket, id, command) {
     case "set_model": s.provider = command.provider; s.model = command.modelId; return ok();
     case "set_rlm_max_depth": s.rlmMaxDepth = command.maxDepth; return ok({ maxDepth: command.maxDepth, source: "chat", globalSaved: false });
     case "get_session_stats": {
+      if (env.FAKE_DAEMON_CHILD_STATS_MISSING && s !== [...sessions.values()][0]) return fail("Child stats unavailable");
       const t = s.stats;
       return ok({ sessionFile: s.sessionFile, sessionId: s.sessionId, userMessages: 0, assistantMessages: 0, toolCalls: 0, toolResults: 0, totalMessages: s.messages,
         tokens: { input: t.input, output: t.output, cacheRead: t.cacheRead, cacheWrite: t.cacheWrite, total: t.total }, cost: t.cost });
@@ -143,12 +150,19 @@ async function handle(socket, id, command) {
         finishPrompt(s, eventsOf());
         if (env.FAKE_DAEMON_DELAYED_CHILD) {
           s.childRunning = true;
+          if (env.FAKE_DAEMON_CHILD_STATS) {
+            const child = create({ config: s.config }); child.stats = { input: 10, output: 20, cacheRead: 30, cacheWrite: 40, total: 100, cost: 0.01 };
+            emit(s, { type: "rlm_child_update", child: { activeSessionId: child.id, status: "running" } });
+          }
           if (env.FAKE_DAEMON_DELAYED_CHILD !== "hang") setTimeout(() => {
-            s.childRunning = false; s.streaming = true;
+            s.childRunning = false;
             setTimeout(() => {
+              s.streaming = true;
+              setTimeout(() => {
               const message = { role: "assistant", content: [{ type: "text", text: "CHILD SAID KESTREL-4" }], stopReason: "stop" };
               finishPrompt(s, [{ type: "message_end", message }, { type: "agent_end", messages: [message] }]);
-            }, 200);
+              }, 200);
+            }, Number(env.FAKE_DAEMON_FOLLOWUP_GAP_MS ?? "0"));
           }, 2000);
         }
         ok();

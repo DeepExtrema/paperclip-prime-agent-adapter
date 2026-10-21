@@ -443,6 +443,22 @@ async function scenarios(plan, check) {
     && JSON.stringify(controlAfter.adapterConfig) === JSON.stringify(control.adapterConfig), controlAfter.adapterType);
 }
 
+function cleanupProcesses(plan, socketPath) {
+  const found = [];
+  const fallback = `/tmp/paperclip-prime-${process.getuid?.() ?? 0}/`;
+  for (const pid of fs.readdirSync("/proc").filter(name => /^\d+$/.test(name))) {
+    if (Number(pid) === process.pid) continue;
+    try {
+      const command = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").join(" ");
+      const env = fs.readFileSync(`/proc/${pid}/environ`, "utf8").split("\0");
+      const belongs = command.includes(plan.root) || (socketPath && command.includes(socketPath)) ||
+        command.includes(fallback) || env.some(entry => entry.startsWith("PRIME_AGENT_CODING_AGENT_DIR=" + plan.root));
+      if (belongs && /prime-agent|rlm\.repl|kernel-venv/.test(command)) found.push({ pid: Number(pid), command });
+    } catch { /* Process exited. */ }
+  }
+  return found;
+}
+
 async function daemonScenarios(plan, check, cid) {
   const adapterConfig = { command: plan.args.primeCommand, model: MODEL, thinking: "off", cwd: plan.workspace, timeoutSec: 600,
     runtime: "daemon", rlmMaxDepth: 1, subagentDefaultModel: MODEL };
@@ -465,6 +481,7 @@ async function daemonScenarios(plan, check, cid) {
     "Step 4. Only after receiving the actual child reply: set child_word to its exact reply text in Python, then run:", "```python",
     'await call(rlm.harness.create_memory("proof codeword", "The proof codeword is OSPREY-9. The child word is " + child_word, global_=True))',
     "print(pc('POST', '/api/companies/' + os.environ['PAPERCLIP_COMPANY_ID'] + '/issues', {'title': 'Daemon proof ' + os.environ['PAPERCLIP_RUN_ID'], 'status': 'todo'}))",
+    "print(pc('PATCH', '/api/issues/' + os.environ['PAPERCLIP_TASK_ID'], {'status': 'done', 'comment': 'Daemon child proof complete'}))",
     "```", "Reply CHILD SAID plus the child's word and stop.",
   ].join("\n"));
   const issue = await api(plan, "POST", `/companies/${cid}/issues`, {
@@ -491,14 +508,16 @@ async function daemonScenarios(plan, check, cid) {
     await collectRun(plan, label, run); runs.push(run);
     const out = spawnSync("pgrep", ["-af", "--", "--mode daemon"], { env: plan.env, encoding: "utf8" });
     fs.writeFileSync(path.join(plan.evidence, `pgrep-after-${label}.txt`), out.stdout);
-    check(`(d) no daemon after ${label.toUpperCase()}`, !out.stdout.split("\n").some(line => line.includes(plan.root)), "");
+    const leftovers = cleanupProcesses(plan, run.resultJson?.socketPath);
+    writeJson(plan, `cleanup-after-${label}.json`, leftovers);
+    check(`(d) no daemon after ${label.toUpperCase()}`, leftovers.length === 0, JSON.stringify(leftovers));
     const sessions = await api(plan, "GET", `/agents/${specialist.id}/task-sessions`);
     writeJson(plan, `sessions-${label}.json`, sessions.filter(session => session.taskKey === issue.id));
   }
   const params = runs.map((run, i) => findSessionParams(run)[0] ?? findSessionParams(JSON.parse(fs.readFileSync(path.join(plan.evidence, `sessions-d${i + 1}.json`), "utf8")))[0]);
   const text = label => fs.readFileSync(path.join(plan.evidence, `run-${label}.json`), "utf8") + fs.readFileSync(path.join(plan.evidence, `run-${label}-log.json`), "utf8");
   const files = dir => fs.readdirSync(dir, { withFileTypes: true }).flatMap(entry => entry.isDirectory() ? files(path.join(dir, entry.name)) : entry.isFile() ? [path.join(dir, entry.name)] : []);
-  const child = params[0] && files(params[0].agentDir).find(file => file.endsWith(".jsonl") && file !== params[0].sessionFile && fs.readFileSync(file, "utf8").includes("KESTREL-4"));
+  const child = params[0] && files(params[0].agentDir).find(file => file.endsWith(".jsonl") && file !== params[0].sessionFile && (() => { const text = fs.readFileSync(file, "utf8"); const header = JSON.parse(text.split("\n")[0]); return header.parentSession === params[0].sessionFile && text.includes("KESTREL-4"); })());
   check("(a) D1 succeeded and used the child's reply", runs[0].status === "succeeded" && text("d1").includes("CHILD SAID KESTREL-4") && Boolean(child), child ?? "no child session");
   // Owner-authorized single-run proof: D2 is deliberately not started.
   check("six session params persisted for the issue", Boolean(params[0]) &&

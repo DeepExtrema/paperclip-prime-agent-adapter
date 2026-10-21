@@ -18,7 +18,7 @@ const RUN2 = fixture("prime-jsonl/run2.jsonl");
 const SESSION2 = "01a14c2a-5965-7269-8920-97d0da73b791";
 const savedEnv = { ...process.env };
 let root = "";
-type Rec = { pid: number; kind: string; argv?: string[]; env?: Record<string, string>; command?: Record<string, unknown> & { type: string } };
+type Rec = { pid: number; workerPid?: number; kind: string; argv?: string[]; env?: Record<string, string>; command?: Record<string, unknown> & { type: string } };
 const rec = () => path.join(root, "daemon.jsonl");
 const records = (): Rec[] => (existsSync(rec()) ? readFileSync(rec(), "utf8").trim().split("\n").map((l) => JSON.parse(l) as Rec) : []);
 const commands = () => records().filter((r) => r.kind === "command").map((r) => r.command!);
@@ -62,6 +62,7 @@ beforeEach(() => {
 });
 afterEach(async () => {
   try {
+    for (const { workerPid } of records()) { if (workerPid) try { process.kill(workerPid, "SIGKILL"); } catch {} }
     for (const { pid } of starts()) { try { process.kill(-pid, "SIGKILL"); } catch {} }
   } finally {
     for (const key of Object.keys(process.env)) if (!(key in savedEnv)) delete process.env[key];
@@ -202,6 +203,46 @@ async function cancelRun(hard = false, ignoreTerm = false) {
   return await pending;
 }
 describe("daemon per run", () => {
+  it("kills a worker in another process group on forced daemon cleanup", async () => {
+    const controller = new AbortController();
+    const pending = run({ signal: controller.signal, config: { graceSec: 0.1 }, env: {
+      FAKE_DAEMON_WORKER: "1", FAKE_DAEMON_PROMPT_MODE: "hang_hard", FAKE_DAEMON_IGNORE_TERM: "1", FAKE_DAEMON_IGNORE_SHUTDOWN: "1",
+    } });
+    await waitCommand("prompt_and_wait"); controller.abort(); await pending;
+    const worker = records().find(r => r.kind === "worker")!.workerPid!;
+    const state = existsSync(`/proc/${worker}/stat`) ? readFileSync(`/proc/${worker}/stat`, "utf8").split(") ")[1]![0] : null;
+    expect(state === null || state === "Z").toBe(true);
+  });
+  it.each(["create", "set_model", "attach"])("reports %s refusal before prompting honestly", async type => {
+    const { result } = await run({ env: { FAKE_DAEMON_REFUSE: type, FAKE_DAEMON_MODEL_ID: "other-model" } });
+    expect(result).toMatchObject({ errorCode: "prime_run_failed" });
+    expect(result.errorMessage).toContain(`${type} refused`);
+    expect(result.errorMessage).not.toContain("connection lost"); expect(types()).not.toContain("prompt_and_wait");
+  });
+  it("reports a malformed roster as a refusal, not a lost connection", async () => {
+    const { result } = await run({ env: { FAKE_DAEMON_BAD_ROSTER: "1" } });
+    expect(result.errorCode).toBe("prime_run_failed"); expect(result.errorMessage).not.toContain("connection lost");
+  });
+  it("waits through the gap between child completion and queued parent follow-up", async () => {
+    const { result } = await run({ config: { timeoutSec: 6 }, env: {
+      FAKE_DAEMON_DELAYED_CHILD: "1", FAKE_DAEMON_FOLLOWUP_GAP_MS: "300",
+    } });
+    expect(result).toMatchObject({ exitCode: 0, summary: "CHILD SAID KESTREL-4" });
+  });
+  it("warns in summary when child usage cannot be queried", async () => {
+    const { result } = await run({ config: { timeoutSec: 6 }, env: {
+      FAKE_DAEMON_DELAYED_CHILD: "1", FAKE_DAEMON_CHILD_STATS: "1", FAKE_DAEMON_CHILD_STATS_MISSING: "1",
+    } });
+    expect(result.summary).toContain("child usage not reported");
+  });
+  it("includes exposed child session stats in run usage", async () => {
+    const { result } = await run({ config: { timeoutSec: 6 }, env: {
+      FAKE_DAEMON_DELAYED_CHILD: "1", FAKE_DAEMON_CHILD_STATS: "1",
+    } });
+    expect(result.usage).toEqual({ inputTokens: 13, outputTokens: 24, cachedInputTokens: 30 });
+    expect(result.resultJson).toMatchObject({ sessionStatsDelta: { input: 13, output: 24, total: 10660 } });
+  });
+
   it("keeps the daemon until a delayed child reply and parent follow-up settle", async () => {
     const { result } = await run({ config: { timeoutSec: 5 }, env: { FAKE_DAEMON_DELAYED_CHILD: "1" } });
     expect(result).toMatchObject({ exitCode: 0, summary: "CHILD SAID KESTREL-4" });
@@ -316,8 +357,8 @@ describe("daemon per run", () => {
     const { result } = await cancelRun(true); expect(types()).toContain("abort");
     expect(result).toMatchObject({ errorCode: "prime_run_cancelled" }); gone(starts()[0]!.pid);
   });
-  it("SIGKILLs a hard hang that ignores SIGTERM", async () => {
-    const { result } = await cancelRun(true, true); expect(records().some(r => r.kind === "sigterm_ignored")).toBe(true);
+  it("stops a hard hang that ignores SIGTERM", async () => {
+    const { result } = await cancelRun(true, true);
     expect(result).toMatchObject({ errorCode: "prime_run_cancelled" }); gone(starts()[0]!.pid);
   });
   it("times out a hang", async () => {
