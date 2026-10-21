@@ -1,5 +1,4 @@
 import type {AdapterExecutionContext, AdapterExecutionResult} from "@paperclipai/adapter-utils";
-import {buildInvocationEnvForLogs, resolveCommandForLogs} from "@paperclipai/adapter-utils/server-utils";
 import {spawn} from "node:child_process";
 import {randomBytes, randomUUID} from "node:crypto";
 import fs from "node:fs/promises";
@@ -8,7 +7,7 @@ import net from "node:net";
 
 import {type ParsedPrimeOutput, PRIME_ADAPTER_TYPE, type PrimeSessionParams} from "../types.js";
 
-import type {PreparedRun, SystemPrompt} from "./execute.js";
+import { emitPrimeMeta, type PreparedRun, type SystemPrompt } from "./execute.js";
 import {parsePrimeJsonl} from "./parse.js";
 
 export type PrimeDaemonErrorCode =|"prime_daemon_start_failed"|"prime_daemon_socket_unsafe"|
@@ -31,7 +30,7 @@ export function primeDaemonEnvelope(id: string, command: Record<string, unknown>
   return {type : "command", id, protocol : PRIME_DAEMON_PROTOCOL, command};
 }
 
-export type PrimeDaemonMessage = Record<string, unknown>&{type : string};
+export type PrimeDaemonMessage = Record<string, unknown> & { type: string };
 export interface PrimeDaemonResponse {
   id: string;
   type: "response";
@@ -40,12 +39,7 @@ export interface PrimeDaemonResponse {
   data?: unknown;
   error?: string;
 }
-type Pending = {
-  resolve: (response: PrimeDaemonResponse) => void;
-  reject : (error: Error) => void;
-  timer : NodeJS.Timeout | null;
-  type : string
-};
+type Pending = { resolve: (response: PrimeDaemonResponse) => void; reject: (error: Error) => void; timer: NodeJS.Timeout | null; type: string };
 
 export class PrimeDaemonClient {
   private buffer = "";
@@ -55,8 +49,7 @@ export class PrimeDaemonClient {
   private closedError: PrimeDaemonError | null = null;
   private helloMessage: PrimeDaemonMessage | null = null;
 
-  private constructor(private readonly socket: net.Socket, private readonly socketPath: string) {
-  }
+  private constructor(private readonly socket: net.Socket, private readonly socketPath: string) {}
 
   /** Connects and resolves after daemon_hello. */
   static connect(socketPath: string, helloTimeoutMs = 5000): Promise<PrimeDaemonClient> {
@@ -64,8 +57,7 @@ export class PrimeDaemonClient {
       const client = new PrimeDaemonClient(net.createConnection(socketPath), socketPath);
       const timer = setTimeout(() => {
         client.close();
-        reject(new PrimeDaemonError("prime_daemon_request_timeout",
-                                    `No daemon_hello on ${socketPath} within ${helloTimeoutMs} ms.`));
+        reject(new PrimeDaemonError("prime_daemon_request_timeout", `No daemon_hello on ${socketPath} within ${helloTimeoutMs} ms.`));
       }, helloTimeoutMs);
       client.socket.setEncoding("utf8");
       client.socket.on("data", (chunk: string) => client.onData(chunk, () => {
@@ -76,9 +68,7 @@ export class PrimeDaemonClient {
       client.socket.on("close", () => {
         client.fail(`Daemon connection on ${socketPath} closed.`);
         clearTimeout(timer);
-        if (!client.helloMessage)
-          reject(client.closedError!);
-      });
+        if (!client.helloMessage) reject(client.closedError!); });
     });
   }
 
@@ -91,21 +81,15 @@ export class PrimeDaemonClient {
     return this.closedError;
   }
 
-  /**
-   * Resolves with the daemon response (success or not). Rejects only on timeout or a closed connection. timeoutMs null
-   * = no timeout.
-   */
-  request(command: Record<string, unknown>&{type : string}, timeoutMs: number | null): Promise<PrimeDaemonResponse> {
-    if (this.closedError)
-      return Promise.reject(this.closedError);
-    const id = `pc-${++this.nextId}`;
+  /** Resolves with the daemon response (success or not). Rejects only on timeout or a closed connection. timeoutMs null = no timeout. */
+  request(command: Record<string, unknown> & { type: string }, timeoutMs: number | null): Promise<PrimeDaemonResponse> {
+    if (this.closedError) return Promise.reject(this.closedError); const id = `pc-${++this.nextId}`;
     return new Promise((resolve, reject) => {
       const timer = timeoutMs === null ? null : setTimeout(() => {
         this.pending.delete(id);
-        reject(new PrimeDaemonError("prime_daemon_request_timeout",
-                                    `No answer to "${command.type}" from ${this.socketPath} within ${timeoutMs} ms.`));
+        reject(new PrimeDaemonError("prime_daemon_request_timeout", `No answer to "${command.type}" from ${this.socketPath} within ${timeoutMs} ms.`));
       }, timeoutMs);
-      this.pending.set(id, {resolve, reject, timer, type : command.type});
+      this.pending.set(id, { resolve, reject, timer, type: command.type });
       this.socket.write(`${JSON.stringify(primeDaemonEnvelope(id, command))}\n`);
     });
   }
@@ -122,13 +106,9 @@ export class PrimeDaemonClient {
   }
 
   private fail(message: string): void {
-    if (this.closedError)
-      return;
-    this.closedError = new PrimeDaemonError("prime_daemon_closed", message);
+    if (this.closedError) return; this.closedError = new PrimeDaemonError("prime_daemon_closed", message);
     for (const [id, pending] of this.pending) {
-      if (pending.timer)
-        clearTimeout(pending.timer);
-      this.pending.delete(id);
+      if (pending.timer) clearTimeout(pending.timer); this.pending.delete(id);
       pending.reject(this.closedError);
     }
   }
@@ -144,11 +124,8 @@ export class PrimeDaemonClient {
       } catch {
         continue;
       }
-      if (typeof message !== "object" || message === null)
-        continue;
-      let wire = message as PrimeDaemonMessage;
-      if (wire.type === "event" && typeof wire.event === "object" && wire.event !== null)
-        wire = wire.event as PrimeDaemonMessage;
+      if (typeof message !== "object" || message === null) continue; let wire = message as PrimeDaemonMessage;
+      if (wire.type === "event" && typeof wire.event === "object" && wire.event !== null) wire = wire.event as PrimeDaemonMessage;
       if (wire.type === "daemon_hello" && !this.helloMessage) {
         this.helloMessage = wire;
         onHello();
@@ -156,14 +133,11 @@ export class PrimeDaemonClient {
       }
       const pending = wire.type === "response" && typeof wire.id === "string" ? this.pending.get(wire.id) : undefined;
       if (pending) {
-        if (pending.timer)
-          clearTimeout(pending.timer);
-        this.pending.delete(wire.id as string);
+        if (pending.timer) clearTimeout(pending.timer); this.pending.delete(wire.id as string);
         pending.resolve(wire as unknown as PrimeDaemonResponse);
         continue;
       }
-      for (const listener of this.listeners)
-        listener(wire);
+      for (const listener of this.listeners) listener(wire);
     }
   }
 }
@@ -307,8 +281,7 @@ async function readJsonObject(file: string): Promise<Record<string, unknown>|nul
 export function primeDaemonSocketPlan(childEnv: Record<string, string | undefined>, userId = process.getuid?.() ?? 0) {
   const env =
     Object.fromEntries(Object.entries(childEnv).filter((entry): entry is[string, string] => entry[1] !== undefined));
-  if (Buffer.byteLength(env.TMPDIR ?? "/tmp") + 55 > 100)
-    env.TMPDIR = `/tmp/paperclip-prime-${userId}/tmp`;
+  if (Buffer.byteLength(env.TMPDIR ?? "/tmp") + 55 > 100) env.TMPDIR = `/tmp/paperclip-prime-${userId}/tmp`;
   const socketPath =
     path.join(env.TMPDIR ?? "/tmp", `paperclip-prime-${userId}`, `${randomBytes(8).toString("hex")}.sock`);
   if (Buffer.byteLength(socketPath) > 100)
@@ -317,291 +290,147 @@ export function primeDaemonSocketPlan(childEnv: Record<string, string | undefine
   return {env, socketPath};
 }
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
-function signalPid(pid: number, signal: NodeJS.Signals) {
-  try {
-    process.kill(pid, signal);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ESRCH")
-      throw err;
-  }
-}
-async function descendantPids(pid: number): Promise<number[]> {
-  const children = await fs.readFile(`/proc/${pid}/task/${pid}/children`, "utf8").catch(() => "");
-  const result: number[] = [];
-  for (const child of children.trim().split(/\s+/).filter(Boolean).map(Number)) {
-    result.push(...await descendantPids(child), child);
-  }
-  return result;
-}
-async function signalTree(pid: number, signal: NodeJS.Signals, known = new Set<number>()) {
-  for (const child of await descendantPids(pid))
-    known.add(child);
-  for (const child of known)
-    signalPid(child, signal);
-  signalPid(pid, signal);
-  return known;
+function signalGroup(pid: number, signal: NodeJS.Signals) {
+  try { process.kill(-pid, signal); }
+  catch (err) { if ((err as NodeJS.ErrnoException).code !== "ESRCH") throw err; }
 }
 type RunDaemon = {
-  pid: number;
-  socketPath : string;
-  stderrTail : string;
-  client : PrimeDaemonClient;
-  descendants : Set<number>;
-  stopDaemon : () => Promise<void>
+  pid: number; socketPath: string; stderrTail: string; client: PrimeDaemonClient;
+  workers: Set<number>; stopDaemon: () => Promise<void>;
 };
-async function startDaemon(ctx: AdapterExecutionContext, prep: PreparedRun): Promise<RunDaemon> {
-  const {env, socketPath} = primeDaemonSocketPlan(prep.childEnv);
-  await fs.mkdir(path.dirname(socketPath), {recursive : true, mode : 0o700});
-  if (env.TMPDIR && env.TMPDIR !== prep.childEnv.TMPDIR)
-    await fs.mkdir(env.TMPDIR, {recursive : true, mode : 0o700});
-  const child = spawn(prep.runtime.command, [ "--mode", "daemon", "--daemon-socket", socketPath ],
-                      {cwd : prep.cwd, env, detached : true, stdio : [ "ignore", "pipe", "pipe" ]});
-  let exited = false, exitCode: number | null = null, stderrTail = "";
+export async function startDaemon(ctx: AdapterExecutionContext, prep: PreparedRun): Promise<RunDaemon> {
+  const { env, socketPath } = primeDaemonSocketPlan(prep.childEnv);
+  await fs.mkdir(path.dirname(socketPath), { recursive: true, mode: 0o700 });
+  if (env.TMPDIR && env.TMPDIR !== prep.childEnv.TMPDIR) {
+    await fs.mkdir(env.TMPDIR, { recursive: true, mode: 0o700 });
+  }
+  const child = spawn(prep.runtime.command, ["--mode", "daemon", "--daemon-socket", socketPath], {
+    cwd: prep.cwd, env, detached: true, stdio: ["ignore", "pipe", "pipe"],
+  });
+  let exited = false;
+  let exitCode: number | null = null;
+  let stderrTail = "";
   let spawnError: Error | null = null;
   let client: PrimeDaemonClient | null = null;
+  const workers = new Set<number>();
   const exit = new Promise<void>(resolve => {
-    child.once("exit", code => {
-      exited = true;
-      exitCode = code;
-      client?.close();
-      resolve();
-    });
-    child.once("error", err => {
-      spawnError = err;
-      exited = true;
-      resolve();
-    });
+    child.once("exit", code => { exited = true; exitCode = code; client?.close(); resolve(); });
+    child.once("error", err => { spawnError = err; exited = true; resolve(); });
   });
-  for (const stream of [child.stdout, child.stderr])
-    stream.on("data", chunk => {
-      const text = chunk.toString();
-      stderrTail = (stderrTail + text).slice(-2000);
-      void ctx.onLog("stderr", text);
-    });
-  const descendants = new Set<number>();
+  for (const stream of [child.stdout, child.stderr]) stream.on("data", chunk => {
+    const text = chunk.toString();
+    stderrTail = (stderrTail + text).slice(-2000);
+    void ctx.onLog("stderr", text);
+  });
   const stopDaemon = async () => {
     try {
       if (!exited) {
-        for (const pid of await descendantPids(child.pid!))
-          descendants.add(pid);
-        await client?.request({type : "shutdown"}, 5000).catch(() => undefined);
-        await Promise.race([ exit, delay(5000) ]);
-        if (!exited) {
-          await signalTree(child.pid!, "SIGTERM", descendants);
-          await Promise.race([ exit, delay(prep.runtime.graceSec * 1000) ]);
+        const shutdownClient = client?.closed
+          ? await PrimeDaemonClient.connect(socketPath, 1000).catch(() => null) : client;
+        const roster = await shutdownClient?.request({ type: "list" }, 1000).catch(() => null);
+        if (roster?.success && isObject(roster.data) && Array.isArray(roster.data.sessions)) {
+          for (const row of roster.data.sessions) {
+            if (isObject(row) && typeof row.workerPid === "number") workers.add(row.workerPid);
+          }
         }
+        await shutdownClient?.request({ type: "shutdown" }, 1000).catch(() => undefined);
+        shutdownClient?.close();
+        await Promise.race([exit, delay(5000)]);
         if (!exited) {
-          await signalTree(child.pid!, "SIGKILL", descendants);
-          await exit;
+          for (const pid of [child.pid!, ...workers]) signalGroup(pid, "SIGTERM");
+          await Promise.race([exit, delay(prep.runtime.graceSec * 1000)]);
+          for (const pid of workers) signalGroup(pid, "SIGKILL");
+          if (!exited) { signalGroup(child.pid!, "SIGKILL"); await exit; }
+          workers.clear();
         }
       }
-    } finally {
-      for (const pid of descendants)
-        signalPid(pid, "SIGKILL");
-      for (const pid of descendants) {
-        for (let attempt = 0; attempt < 100; attempt++) {
-          const stat = await fs.readFile(`/proc/${pid}/stat`, "utf8").catch(() => "");
-          if (!stat || stat.split(") ")[1]?.startsWith("Z"))
-            break;
-          await delay(10);
-        }
+      if (exited && exitCode !== 0 && workers.size > 0) {
+        for (const pid of workers) signalGroup(pid, "SIGTERM");
+        await delay(prep.runtime.graceSec * 1000);
+        for (const pid of workers) signalGroup(pid, "SIGKILL");
       }
-      client?.close();
-      await fs.rm(socketPath, {force : true});
-    }
+    } finally { client?.close(); await fs.rm(socketPath, { force: true }); }
   };
   try {
-    if (child.pid)
-      await ctx.onSpawn?.({pid : child.pid, processGroupId : child.pid, startedAt : new Date().toISOString()});
+    if (child.pid) await ctx.onSpawn?.({ pid: child.pid, processGroupId: child.pid, startedAt: new Date().toISOString() });
     const until = Date.now() + 20_000;
     while (!exited && Date.now() < until) {
-      try {
-        client = await PrimeDaemonClient.connect(socketPath, 1000);
-        break;
-      } catch {
-        await delay(50);
-      }
+      try { client = await PrimeDaemonClient.connect(socketPath, 1000); break; }
+      catch { await delay(50); }
     }
     if (!client || exited) {
-      if (!exited && child.pid) {
-        await signalTree(child.pid, "SIGKILL", descendants);
-        await exit;
-      }
       throw new PrimeDaemonError("prime_daemon_start_failed",
-                                 `prime-agent daemon did not start (exit ${exitCode}). stderr: ${stderrTail}${
-                                   spawnError ? ` ${spawnError.message}` : ""}`);
+        `prime-agent daemon did not start (exit ${exitCode}). stderr: ${stderrTail} ${String(spawnError ?? "")}`);
     }
-    return {
-      pid : child.pid!,
-      socketPath,
-      get stderrTail() {
-        return stderrTail;
-      },
-      client,
-      descendants,
-      stopDaemon
-    };
-  } catch (err) {
-    await stopDaemon();
-    throw err;
-  }
+    return { pid: child.pid!, socketPath, get stderrTail() { return stderrTail; }, client, workers, stopDaemon };
+  } catch (err) { await stopDaemon(); throw err; }
 }
-type Stage = "create_failed"|"prompt_failed"|"completed"|"closed"|"timed_out"|"cancelled";
-type StatsDelta = {
-  input: number;
-  output : number;
-  cacheRead : number;
-  cacheWrite : number;
-  total : number;
-  cost : number;
-};
-type SessionSummary = {
-  activeSessionId: string;
-  sessionId : string;
-  sessionFile : string;
-  provider : string | null;
-  model : string | null;
-  thinkingLevel : string | null
-};
+type Stage = "create_failed" | "prompt_failed" | "completed" | "closed" | "timed_out" | "cancelled";
+type StatsDelta = { input: number; output: number; cacheRead: number; cacheWrite: number; total: number; cost: number };
+type SessionSummary = { activeSessionId: string; sessionId: string; sessionFile: string; provider: string | null; model: string | null; thinkingLevel: string | null };
 type Outcome = {
-  stage: Stage;
-  error : string | null;
-  stdout : string;
-  parsed : ParsedPrimeOutput;
-  session : SessionSummary | null;
-  lastText : string | null;
-  statsDelta : StatsDelta | null;
-  autonomousStatus : unknown;
+  stage: Stage; error: string | null; stdout: string; parsed: ParsedPrimeOutput; session: SessionSummary | null;
+  lastText: string | null; statsDelta: StatsDelta | null; autonomousStatus: unknown; usageNote?: string;
 };
-const isObject = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
+const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const str = (value: unknown) => (typeof value === "string" && value.length > 0 ? value : null);
+
 function readSummary(data: unknown): SessionSummary | null {
-  if (!isObject(data))
-    return null;
-  const [activeSessionId, sessionId, sessionFile] =
-    [ str(data.activeSessionId), str(data.sessionId), str(data.sessionFile) ];
-  if (!activeSessionId || !sessionId || !sessionFile)
-    return null;
-  const model = isObject(data.model) ? data.model : {};
-  return {
-    activeSessionId,
-    sessionId,
-    sessionFile,
-    provider : str(model.provider),
-    model : str(model.id),
-    thinkingLevel : str(data.thinkingLevel)
-  };
+  if (!isObject(data)) return null;
+  const [activeSessionId, sessionId, sessionFile] = [str(data.activeSessionId), str(data.sessionId), str(data.sessionFile)];
+  if (!activeSessionId || !sessionId || !sessionFile) return null; const model = isObject(data.model) ? data.model : {};
+  return { activeSessionId, sessionId, sessionFile, provider: str(model.provider), model: str(model.id), thinkingLevel: str(data.thinkingLevel) };
 }
-function readStats(response: PrimeDaemonResponse|null): StatsDelta | null {
+
+function readStats(response: PrimeDaemonResponse | null): StatsDelta | null {
   const data = response?.success ? response.data : null;
-  if (!isObject(data) || !isObject(data.tokens))
-    return null;
-  const t = data.tokens;
+  if (!isObject(data) || !isObject(data.tokens)) return null; const t = data.tokens;
   const n = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : 0);
-  return {
-    input : n(t.input),
-    output : n(t.output),
-    cacheRead : n(t.cacheRead),
-    cacheWrite : n(t.cacheWrite),
-    total : n(t.total),
-    cost : n(data.cost)
-  };
+  return { input: n(t.input), output: n(t.output), cacheRead: n(t.cacheRead), cacheWrite: n(t.cacheWrite), total: n(t.total), cost: n(data.cost) };
 }
+
 function delta(before: StatsDelta | null, after: StatsDelta | null): StatsDelta | null {
-  if (!before || !after)
-    return null;
-  return {
-    input : after.input - before.input,
-    output : after.output - before.output,
-    cacheRead : after.cacheRead - before.cacheRead,
-    cacheWrite : after.cacheWrite - before.cacheWrite,
-    total : after.total - before.total,
-    cost : after.cost - before.cost
-  };
+  if (!before || !after) return null;
+  return { input: after.input - before.input, output: after.output - before.output, cacheRead: after.cacheRead - before.cacheRead,
+    cacheWrite: after.cacheWrite - before.cacheWrite, total: after.total - before.total, cost: after.cost - before.cost };
 }
+
 function createConfig(prep: PreparedRun, native: PrimeNativeConfig, system: SystemPrompt): Record<string, unknown> {
-  const {runtime, cwd} = prep;
+  const { runtime, cwd } = prep;
   const a = native.autonomous;
-  const set = <T>(key: string, value: T|null) => (value === null ? {} : {[key] : value});
+  const set = <T>(key: string, value: T | null) => (value === null ? {} : { [key]: value });
   return {
-    cwd,
-    agentDir : runtime.agentDir.agentDir,
-    sessionDir : runtime.agentDir.sessionDir,
-    provider : runtime.provider,
-    model : runtime.model,
+    cwd, agentDir: runtime.agentDir.agentDir, sessionDir: runtime.agentDir.sessionDir, provider: runtime.provider, model: runtime.model,
     ...set("thinking", runtime.thinking),
-    appendSystemPrompt : [ system.text, runtime.appendSystemPrompt ?? "" ].filter((text) => text.trim().length > 0),
-    skills : prep.skills.skillDirs,
-    ...(runtime.noContextFiles ? {noContextFiles : true} : {}),
-    ...(a ? {
-      autonomous : {
-        enabled : true,
-        ...set("maxTurns", a.maxTurns),
-        ...set("maxTokens", a.maxTokens),
-        ...set("maxContinuations", a.maxContinuations),
-        ...set("timeoutMs", a.timeoutMs),
-        gates : {
-          commands : a.gates.commands,
-          ...set("maxRetries", a.gates.maxRetries),
-          ...set("timeoutMs", a.gates.timeoutMs)
-        }
-      }
-    }
-          : {}),
-    ...(native.goal
-          ? {initialGoal : {objective : native.goal.objective, ...set("tokenBudget", native.goal.tokenBudget)}}
-          : {}),
-    serializedRefine : true,
-    telemetryDisabled : true,
+    appendSystemPrompt: [system.text, runtime.appendSystemPrompt ?? ""].filter((text) => text.trim().length > 0),
+    skills: prep.skills.skillDirs,
+    ...(runtime.noContextFiles ? { noContextFiles: true } : {}),
+    ...(a ? { autonomous: { enabled: true, ...set("maxTurns", a.maxTurns), ...set("maxTokens", a.maxTokens), ...set("maxContinuations", a.maxContinuations),
+      ...set("timeoutMs", a.timeoutMs), gates: { commands: a.gates.commands, ...set("maxRetries", a.gates.maxRetries), ...set("timeoutMs", a.gates.timeoutMs) } } } : {}),
+    ...(native.goal ? { initialGoal: { objective: native.goal.objective, ...set("tokenBudget", native.goal.tokenBudget) } } : {}),
+    serializedRefine: true,
+    telemetryDisabled: true,
   };
 }
-function watchStop(ctx: AdapterExecutionContext, prep: PreparedRun, client: PrimeDaemonClient, activeSessionId: string,
-                   pid: number, descendants: Set<number>) {
-  let reason: "cancelled"|"timed_out"|null = null;
-  let disposed = false;
+
+function watchStop(ctx: AdapterExecutionContext, prep: PreparedRun, client: PrimeDaemonClient, activeSessionId: string) {
+  let reason: "cancelled" | "timed_out" | null = null;
   const timers: NodeJS.Timeout[] = [];
-  const fire = (why: "cancelled"|"timed_out") => {
-    if (disposed || reason)
-      return;
-    reason = why;
-    void client.request({type : "abort", activeSessionId}, 10_000).catch(() => undefined);
-    timers.push(setTimeout(() => {
-      if (disposed)
-        return;
-      void (async () => {
-        for (const child of await descendantPids(pid))
-          descendants.add(child);
-        await client.request({type : "shutdown"}, 1000).catch(() => undefined);
-        if (disposed)
-          return;
-        await signalTree(pid, "SIGTERM", descendants);
-        timers.push(setTimeout(() => {
-          if (!disposed)
-            void signalTree(pid, "SIGKILL", descendants);
-        }, prep.runtime.graceSec * 1000));
-      })();
-    }, prep.runtime.graceSec * 1000));
+  const fire = (why: "cancelled" | "timed_out") => {
+    if (reason) return; reason = why;
+    void client.request({ type: "abort", activeSessionId }, 1000).catch(() => undefined);
+    timers.push(setTimeout(() => client.close(), prep.runtime.graceSec * 1000));
   };
   const onAbort = () => fire("cancelled");
-  if (ctx.signal?.aborted)
-    fire("cancelled");
-  ctx.signal?.addEventListener("abort", onAbort, {once : true});
-  if (prep.deadlineMs !== null)
-    timers.push(setTimeout(() => fire("timed_out"), Math.max(1, prep.deadlineMs - Date.now())));
-  return {
-    reason : () => reason,
-    dispose : () => {
-      disposed = true;
-      ctx.signal?.removeEventListener("abort", onAbort);
-      for (const t of timers)
-        clearTimeout(t);
-    }
-  };
+  if (ctx.signal?.aborted) fire("cancelled"); ctx.signal?.addEventListener("abort", onAbort, { once: true });
+  if (prep.deadlineMs !== null) timers.push(setTimeout(() => fire("timed_out"), Math.max(1, prep.deadlineMs - Date.now())));
+  return { reason: () => reason, dispose: () => {
+    ctx.signal?.removeEventListener("abort", onAbort);
+    for (const timer of timers) clearTimeout(timer);
+  } };
 }
 function pendingStop(ctx: AdapterExecutionContext, prep: PreparedRun): "cancelled"|"timed_out"|null {
-  if (ctx.signal?.aborted)
-    return "cancelled";
+  if (ctx.signal?.aborted) return "cancelled";
   return prep.deadlineMs !== null && Date.now() >= prep.deadlineMs ? "timed_out" : null;
 }
 async function runAttempt(
@@ -624,6 +453,8 @@ async function runAttempt(
   let session: SessionSummary | null = null;
   let autonomousStatus: unknown = null;
   const childIds = new Set<string>();
+  const childStatus = new Map<string, { status: string; consumedAfter: number }>();
+  let parentEnds = 0;
   let childUsageMissing = false;
   let terminalSessionError: string | null = null;
   let prompted = false;
@@ -638,7 +469,6 @@ async function runAttempt(
       stage = "closed";
       error = `${terminalSessionError} Daemon stderr: ${daemon.stderrTail}`;
     }
-    stop?.dispose();
     return {
       stage,
       error,
@@ -651,13 +481,10 @@ async function runAttempt(
       ...extra
     };
   };
-  if (stopReason())
-    return await outcome(stopReason()!, null);
+  if (stopReason()) return await outcome(stopReason()!, null);
   const client = daemon.client;
   let unsubscribe: (() => void)|null = null;
   try {
-    if (stopReason())
-      return await outcome(stopReason()!, null);
     const config = createConfig(prep, native, system);
     let selectedId: string | null = null;
     const closeSelected = (id: string, reason: string) => {
@@ -665,24 +492,27 @@ async function runAttempt(
       client.close(); // Reject local waits only; no session/daemon command.
     };
     unsubscribe = client.onMessage((message) => {
+      if (message.activeSessionId === selectedId && isObject(message.event) && message.event.type === "agent_end") parentEnds++;
       if (message.type === "session_event" && isObject(message.event) && message.event.type === "rlm_child_update" &&
           isObject(message.event.child)) {
         const childId = str(message.event.child.activeSessionId);
-        if (childId)
+        if (childId) {
           childIds.add(childId);
+          const previous = childStatus.get(childId);
+          const status = str(message.event.child.status) ?? "running";
+          childStatus.set(childId, { status, consumedAfter: previous?.status === status
+            ? previous.consumedAfter : parentEnds + 1 });
+        }
         else
           childUsageMissing = true;
       }
       const id = str(message.activeSessionId);
       if (message.type === "session_closed" && id) {
         const reason = str(message.reason) ?? "no reason supplied";
-        if (selectedId === id)
-          closeSelected(id, reason);
+        if (selectedId === id) closeSelected(id, reason);
       } else if (selectedId === id && message.type === "session_event" && isObject(message.event))
         emit(`${JSON.stringify(message.event)}\n`);
     });
-    if (stopReason())
-      return await outcome(stopReason()!, null);
     const created = await client.request({
       type : "create",
       lifecycle : "resident",
@@ -707,44 +537,23 @@ async function runAttempt(
       await must({type : "set_model", provider : runtime.provider, modelId : runtime.model});
     if (runtime.thinking !== null && session.thinkingLevel !== runtime.thinking)
       await must({type : "set_thinking_level", level : runtime.thinking});
-    if (native.rlmMaxDepth !== null)
-      await must({type : "set_rlm_max_depth", maxDepth : native.rlmMaxDepth});
+    if (native.rlmMaxDepth !== null) await must({type : "set_rlm_max_depth", maxDepth : native.rlmMaxDepth});
     emit(`${
       JSON.stringify(
         {type : "session", version : 3, id : session.sessionId, timestamp : new Date().toISOString(), cwd})}\n`);
     await must({type : "attach"});
     const prompt = userPrompt(resumeSessionFile !== null);
-    const resolvedCommand = await resolveCommandForLogs(runtime.command, cwd, prep.childEnv);
-    const runtimeEnv = Object.fromEntries(
-      Object.entries(prep.childEnv).filter((entry): entry is[string, string] => entry[1] !== undefined));
-    const loggedKeys =
-      new Set([...Object.keys(prep.paperclipEnv), "PRIME_AGENT_CODING_AGENT_DIR", "PRIME_AGENT_TELEMETRY" ]); // A18
-    await ctx.onMeta?.({
-      adapterType : PRIME_ADAPTER_TYPE,
-      command : resolvedCommand,
-      cwd,
-      commandNotes : [
-        ...notes, `Prime daemon pid ${daemon.pid} (per run), socket ${daemon.socketPath}, session ${session.sessionId}.`
-      ],
-      commandArgs : [ "--mode", "daemon", "--daemon-socket", daemon.socketPath ],
-      env : buildInvocationEnvForLogs(
-        Object.fromEntries(Object.entries(runtimeEnv).filter(([ key ]) => loggedKeys.has(key))),
-        {runtimeEnv, includeRuntimeKeys : [ "HOME" ], resolvedCommand}),
-      prompt,
-      promptMetrics : {systemPromptChars : system.text.length, promptChars : prompt.length},
-      context : ctx.context,
-    });
+    await emitPrimeMeta(ctx, prep, system,
+      [...notes, `Prime daemon pid ${daemon.pid} (per run), socket ${daemon.socketPath}, session ${session.sessionId}.`],
+      ["--mode", "daemon", "--daemon-socket", daemon.socketPath], prompt);
     const before = readStats(await client.request({type : "get_session_stats", activeSessionId : sid}, 30_000));
-    if (stopReason())
-      return await outcome(stopReason()!, null);
-    stop = watchStop(ctx, prep, client, sid, daemon.pid, daemon.descendants);
-    if (stopReason())
-      return await outcome(stopReason()!, null);
+    if (stopReason()) return await outcome(stopReason()!, null);
+    stop = watchStop(ctx, prep, client, sid);
+    if (stopReason()) return await outcome(stopReason()!, null);
     prompted = true;
     const promptResponse = await client.request(
       {type : "prompt_and_wait", activeSessionId : sid, message : prompt, queueIfBusy : false}, null);
-    if (stopReason())
-      return await outcome(stopReason()!, null);
+    if (stopReason()) return await outcome(stopReason()!, null);
     if (!promptResponse.success) {
       const error = promptResponse.error ?? "prompt_and_wait failed without an error text.";
       return await outcome("prompt_failed", error);
@@ -752,26 +561,30 @@ async function runAttempt(
     {
       const headless = await client.request({type : "wait_for_headless_completion", activeSessionId : sid}, null);
       autonomousStatus = headless.success ? headless.data ?? null : {error : headless.error ?? null};
-      if (stopReason())
-        return await outcome(stopReason()!, null);
+      if (stopReason()) return await outcome(stopReason()!, null);
       if (!headless.success)
         return await outcome("prompt_failed",
                              headless.error ?? "wait_for_headless_completion failed without an error text.");
     }
-    let wasBusy = false;
-    let idleSince: number | null = null;
     for (;;) {
       const listed = await client.request({type : "list"}, 30_000);
       const rows = listed.success && isObject(listed.data) && Array.isArray(listed.data.sessions)
                      ? listed.data.sessions.filter(isObject)
                      : null;
-      if (!rows)
-        return await outcome("prompt_failed", listed.error ?? "Unexpected daemon list response.");
+      if (!rows) return await outcome("prompt_failed", listed.error ?? "Unexpected daemon list response.");
+      for (const row of rows) if (typeof row.workerPid === "number") daemon.workers.add(row.workerPid);
+      for (const row of rows) {
+        if (typeof row.rlmDepth === "number" && row.rlmDepth > 0) {
+          const id = str(row.activeSessionId);
+          if (id) childIds.add(id);
+          else childUsageMissing = true;
+        }
+      }
       const parent = rows.find(row => row.activeSessionId === sid);
-      if (!parent)
-        return await outcome("prompt_failed", "Parent session missing from daemon list.");
+      if (!parent) return await outcome("prompt_failed", "Parent session missing from daemon list.");
       const actions = isObject(parent.sessionActions) ? parent.sessionActions : {};
-      const childrenPending = parent.hasRunningSubagents === true;
+      const childrenPending = parent.hasRunningSubagents === true || [...childStatus.values()].some(child =>
+        !["done", "completed", "error", "cancelled"].includes(child.status) || parentEnds < child.consumedAfter);
       const busy = childrenPending || parent.isSessionActive === true || parent.isStreaming === true ||
                    parent.isRunningTools === true || parent.isBashRunning === true ||
                    Number(actions.queuedCount ?? 0) > 0;
@@ -782,16 +595,7 @@ async function runAttempt(
         return await outcome(stopReason()!,
                              `${text ?? ""}${childrenPending ? " children still running at timeout" : ""}`.trim());
       }
-      if (busy) {
-        wasBusy = true;
-        idleSince = null;
-      } else if (!wasBusy)
-        break;
-      else if (idleSince !== null && Date.now() - idleSince >= 500)
-        break;
-      else
-        idleSince ??= Date.now();
-      await delay(250);
+      if (!busy) break; await delay(250);
     }
     const last = await client.request({type : "get_last_assistant_text", activeSessionId : sid}, 30_000);
     const after = readStats(await client.request({type : "get_session_stats", activeSessionId : sid}, 30_000));
@@ -808,10 +612,9 @@ async function runAttempt(
     const lastText = last.success && isObject(last.data) ? str(last.data.text) : null;
     return await outcome(
       "completed", null,
-      {lastText : childUsageMissing ? `${lastText ?? ""} (child usage not reported)` : lastText, statsDelta});
+      { lastText, statsDelta, usageNote: childUsageMissing ? "child usage not reported" : undefined });
   } catch (err) {
-    if (stopReason())
-      return await outcome(stopReason()!, null);
+    if (stopReason()) return await outcome(stopReason()!, null);
     if (err instanceof PrimeDaemonError) {
       const uncertain = prompted && err.code === "prime_daemon_closed";
       return await outcome(uncertain ? "closed" : "prompt_failed",
@@ -824,79 +627,38 @@ async function runAttempt(
   }
 }
 function mapResult(o: Outcome, prep: PreparedRun, daemon: RunDaemon, clearSession: boolean): AdapterExecutionResult {
-  const {runtime, seeded} = prep;
+  const { runtime, seeded } = prep;
   const usage = o.statsDelta;
   const base: AdapterExecutionResult = {
-    exitCode : 1,
-    signal : null,
-    timedOut : false,
-    provider : runtime.provider,
-    model : runtime.modelRef,
-    biller : runtime.provider,
-    billingType : seeded.billingType,
-    ...(usage ? {usage : {inputTokens : usage.input, outputTokens : usage.output, cachedInputTokens : usage.cacheRead}}
-              : {}),
-    usageBasis : "per_run",
-    costUsd : seeded.billingType === "api" && usage !== null && usage.cost > 0 ? usage.cost : null,
-    resultJson : {
-      stdout : o.stdout,
-      stderr : daemon.stderrTail,
-      runtime : "daemon",
-      socketPath : daemon.socketPath,
-      daemonPid : daemon.pid,
-      activeSessionId : o.session?.activeSessionId ?? null,
-      sessionStatsDelta : usage,
-      parsedUsage : o.parsed.usage,
-      autonomousStatus : o.autonomousStatus,
-      cacheWriteTokens : usage?.cacheWrite ?? null,
-      totalTokens : usage?.total ?? null,
+    exitCode: 1, signal: null, timedOut: false,
+    provider: runtime.provider, model: runtime.modelRef, biller: runtime.provider, billingType: seeded.billingType,
+    ...(usage ? { usage: { inputTokens: usage.input, outputTokens: usage.output, cachedInputTokens: usage.cacheRead } } : {}),
+    usageBasis: "per_run",
+    costUsd: seeded.billingType === "api" && usage !== null && usage.cost > 0 ? usage.cost : null,
+    resultJson: {
+      stdout: o.stdout, stderr: daemon.stderrTail, runtime: "daemon", socketPath: daemon.socketPath, daemonPid: daemon.pid,
+      activeSessionId: o.session?.activeSessionId ?? null, sessionStatsDelta: usage, parsedUsage: o.parsed.usage, usageNote: o.usageNote,
+      autonomousStatus: o.autonomousStatus, cacheWriteTokens: usage?.cacheWrite ?? null, totalTokens: usage?.total ?? null,
     },
     clearSession,
   };
-  const fail = (errorCode: string, errorMessage: string): AdapterExecutionResult =>
-    ({...base, errorCode, errorMessage});
+  const fail = (errorCode: string, errorMessage: string): AdapterExecutionResult => ({ ...base, errorCode, errorMessage });
   switch (o.stage) {
-  case "timed_out":
-    return {
-      ...fail("prime_run_timeout", `Timed out after ${runtime.timeoutSec}s${o.error ? `: ${o.error}` : ""}`),
-      exitCode : null,
-      timedOut : true
-    };
-  case "cancelled":
-    return fail("prime_run_cancelled", "Run cancelled.");
-  case "closed":
-    return fail("prime_run_uncertain", `Prime daemon connection lost; the run outcome is uncertain. ${o.error}`);
-  case "create_failed":
-  case "prompt_failed":
-    return fail("prime_run_failed", o.error ?? "Prime daemon run failed.");
-  case "completed":
-    break;
+    case "timed_out": return { ...fail("prime_run_timeout", `Timed out after ${runtime.timeoutSec}s${o.error ? `: ${o.error}` : ""}`), exitCode: null, timedOut: true };
+    case "cancelled": return fail("prime_run_cancelled", "Run cancelled.");
+    case "closed": return fail("prime_run_uncertain", `Prime daemon connection lost; the run outcome is uncertain. ${o.error}`);
+    case "create_failed":
+    case "prompt_failed": return fail("prime_run_failed", o.error ?? "Prime daemon run failed.");
+    case "completed": break;
   }
-  if (!o.parsed.sawAgentEnd)
-    return fail("prime_run_uncertain",
-                "The Prime daemon reported completion without an agent_end event; the run outcome is uncertain.");
-  if (o.parsed.errors.length > 0)
-    return fail("prime_run_failed", o.parsed.errors[0]!);
-  const s = o.session!;
-  const sessionParams: PrimeSessionParams = {
-    sessionId : s.sessionId,
-    sessionFile : s.sessionFile,
-    cwd : prep.cwd,
-    provider : runtime.provider,
-    model : runtime.model,
-    agentDir : runtime.agentDir.agentDir
-  };
-  return {
-    ...base,
-    exitCode : 0,
-    errorCode : null,
-    errorMessage : null,
-    sessionId : s.sessionId,
-    sessionParams : {...sessionParams},
-    sessionDisplayId : s.sessionId,
-    summary : o.lastText ?? o.parsed.finalMessage
-  };
+  if (!o.parsed.sawAgentEnd) return fail("prime_run_uncertain", "The Prime daemon reported completion without an agent_end event; the run outcome is uncertain.");
+  if (o.parsed.errors.length > 0) return fail("prime_run_failed", o.parsed.errors[0]!); const s = o.session!;
+  const sessionParams: PrimeSessionParams = { sessionId: s.sessionId, sessionFile: s.sessionFile, cwd: prep.cwd,
+    provider: runtime.provider, model: runtime.model, agentDir: runtime.agentDir.agentDir };
+  return { ...base, exitCode: 0, errorCode: null, errorMessage: null, sessionId: s.sessionId, sessionParams: { ...sessionParams },
+    sessionDisplayId: s.sessionId, summary: o.lastText ?? o.parsed.finalMessage };
 }
+
 export async function executeDaemon(input: {
   ctx: AdapterExecutionContext;
   prep : PreparedRun;
@@ -921,8 +683,7 @@ export async function executeDaemon(input: {
   try {
     daemon = await startDaemon(ctx, prep);
   } catch (err) {
-    if (!(err instanceof PrimeDaemonError))
-      throw err;
+    if (!(err instanceof PrimeDaemonError)) throw err;
     return {
       exitCode : 1,
       signal : null,

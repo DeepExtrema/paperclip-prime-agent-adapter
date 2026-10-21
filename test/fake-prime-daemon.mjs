@@ -23,9 +23,11 @@ if (argv[0] !== "--mode" || argv[1] !== "daemon" || !socketPath) {
   process.exit(64);
 }
 record({ kind: "start", argv, cwd: process.cwd(), env });
+let workerPid = process.pid;
 if (env.FAKE_DAEMON_WORKER) {
   const worker = spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"], { detached: true, stdio: "ignore" });
-  record({ kind: "worker", workerPid: worker.pid });
+  workerPid = worker.pid;
+  record({ kind: "worker", workerPid });
 }
 if (env.FAKE_DAEMON_EXIT_AT_START === "1") {
   process.stderr.write("fake-prime-daemon: boom at start\n");
@@ -59,9 +61,9 @@ const lastText = (events) => {
 };
 function summary(s) {
   return { id: s.id, activeSessionId: s.id, lifecycle: s.prompted ? "live" : "draft", activity: s.streaming ? "working" : "idle",
-    rlmDepth: 0, sessionId: s.sessionId, sessionFile: s.sessionFile, cwd: s.cwd, thinkingLevel: s.thinking,
+    rlmDepth: s.depth ?? 0, sessionId: s.sessionId, sessionFile: s.sessionFile, cwd: s.cwd, thinkingLevel: s.thinking,
     model: { id: s.model, provider: s.provider }, isSessionActive: s.streaming, isStreaming: s.streaming, isCompacting: false, isBashRunning: false,
-    hasRunningSubagents: s.childRunning || env.FAKE_DAEMON_SUBAGENTS_RUNNING === "1", attachedClients: s.clients.size, messageCount: s.messages, workerState: "ready", workerPid: process.pid };
+    hasRunningSubagents: s.childRunning || env.FAKE_DAEMON_SUBAGENTS_RUNNING === "1", attachedClients: s.clients.size, messageCount: s.messages, workerState: "ready", workerPid };
 }
 function emit(s, event) {
   s.seq += 1;
@@ -147,15 +149,24 @@ async function handle(socket, id, command) {
         return undefined;
       }
       setTimeout(() => {
+        if (env.FAKE_DAEMON_CHILD_INSIDE) emit(s, { type: "rlm_child_update", child: { activeSessionId: "inside", status: "done" } });
         finishPrompt(s, eventsOf());
         if (env.FAKE_DAEMON_DELAYED_CHILD) {
           s.childRunning = true;
+          emit(s, { type: "rlm_child_update", child: { activeSessionId: "delayed-child", status: "running" } });
           if (env.FAKE_DAEMON_CHILD_STATS) {
-            const child = create({ config: s.config }); child.stats = { input: 10, output: 20, cacheRead: 30, cacheWrite: 40, total: 100, cost: 0.01 };
+            const child = create({ config: s.config }); child.stats = { input: 10, output: 20, cacheRead: 30, cacheWrite: 40, total: 100, cost: 0.01 }; s.statsChild = child;
             emit(s, { type: "rlm_child_update", child: { activeSessionId: child.id, status: "running" } });
+            child.depth = 1;
+            if (env.FAKE_DAEMON_GRANDCHILD) {
+              const grandchild = create({ config: s.config }); grandchild.depth = 2;
+              grandchild.stats = { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, total: 10, cost: 0.001 };
+            }
           }
           if (env.FAKE_DAEMON_DELAYED_CHILD !== "hang") setTimeout(() => {
             s.childRunning = false;
+            if (s.statsChild) emit(s, { type: "rlm_child_update", child: { activeSessionId: s.statsChild.id, status: "done" } });
+            emit(s, { type: "rlm_child_update", child: { activeSessionId: "delayed-child", status: "done" } });
             setTimeout(() => {
               s.streaming = true;
               setTimeout(() => {

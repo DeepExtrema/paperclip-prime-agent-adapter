@@ -162,14 +162,10 @@ function lineBufferedLog(onLog: AdapterExecutionContext["onLog"]) {
     for (const line of lines) if (line) await onLog(stream, `${line}\n`);
   } };
 }
-async function runAttempt(ctx: AdapterExecutionContext, prep: PreparedRun, system: SystemPrompt, notes: string[], resumeSessionFile: string | null): Promise<Attempt> {
+export async function emitPrimeMeta(
+  ctx: AdapterExecutionContext, prep: PreparedRun, system: SystemPrompt, notes: string[], args: string[], prompt: string,
+) {
   const { runtime, cwd } = prep;
-  const prompt = buildUserPrompt(ctx, runtime, system.ownsDefaultPolicy, resumeSessionFile !== null);
-  const args = buildPrimeArgs({
-    provider: runtime.provider, model: runtime.model, thinking: runtime.thinking, cwd, sessionDir: runtime.agentDir.sessionDir,
-    resumeSessionFile, skillDirs: prep.skills.skillDirs, appendSystemPrompts: [system.text, runtime.appendSystemPrompt ?? ""],
-    noContextFiles: runtime.noContextFiles, extraArgs: runtime.extraArgs, prompt,
-  });
   const resolvedCommand = await resolveCommandForLogs(runtime.command, cwd, prep.childEnv);
   const runtimeEnv = Object.fromEntries(Object.entries(prep.childEnv).filter((entry): entry is [string, string] => entry[1] !== undefined));
   const loggedKeys = new Set([...Object.keys(prep.paperclipEnv), "PRIME_AGENT_CODING_AGENT_DIR", "PRIME_AGENT_TELEMETRY"]); // A18
@@ -179,6 +175,16 @@ async function runAttempt(ctx: AdapterExecutionContext, prep: PreparedRun, syste
     env: buildInvocationEnvForLogs(loggedEnv, { runtimeEnv, includeRuntimeKeys: ["HOME"], resolvedCommand }),
     prompt, promptMetrics: { systemPromptChars: system.text.length, promptChars: prompt.length }, context: ctx.context,
   });
+}
+async function runAttempt(ctx: AdapterExecutionContext, prep: PreparedRun, system: SystemPrompt, notes: string[], resumeSessionFile: string | null): Promise<Attempt> {
+  const { runtime, cwd } = prep;
+  const prompt = buildUserPrompt(ctx, runtime, system.ownsDefaultPolicy, resumeSessionFile !== null);
+  const args = buildPrimeArgs({
+    provider: runtime.provider, model: runtime.model, thinking: runtime.thinking, cwd, sessionDir: runtime.agentDir.sessionDir,
+    resumeSessionFile, skillDirs: prep.skills.skillDirs, appendSystemPrompts: [system.text, runtime.appendSystemPrompt ?? ""],
+    noContextFiles: runtime.noContextFiles, extraArgs: runtime.extraArgs, prompt,
+  });
+  await emitPrimeMeta(ctx, prep, system, notes, args, prompt);
   throwIfAborted(ctx);
   const lines = lineBufferedLog(ctx.onLog);
   const proc = await runChildProcess(ctx.runId, runtime.command, args, {
