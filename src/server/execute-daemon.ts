@@ -453,8 +453,8 @@ async function runAttempt(
   let session: SessionSummary | null = null;
   let autonomousStatus: unknown = null;
   const childIds = new Set<string>();
-  const childStatus = new Map<string, { status: string; consumedAfter: number }>();
-  let parentEnds = 0;
+  const childStatus = new Map<string, { status: string; snapshotAfter: number }>();
+  let rosterRequests = 0;
   let childUsageMissing = false;
   let terminalSessionError: string | null = null;
   let prompted = false;
@@ -492,7 +492,6 @@ async function runAttempt(
       client.close(); // Reject local waits only; no session/daemon command.
     };
     unsubscribe = client.onMessage((message) => {
-      if (message.activeSessionId === selectedId && isObject(message.event) && message.event.type === "agent_end") parentEnds++;
       if (message.type === "session_event" && isObject(message.event) && message.event.type === "rlm_child_update" &&
           isObject(message.event.child)) {
         const childId = str(message.event.child.activeSessionId);
@@ -500,8 +499,8 @@ async function runAttempt(
           childIds.add(childId);
           const previous = childStatus.get(childId);
           const status = str(message.event.child.status) ?? "running";
-          childStatus.set(childId, { status, consumedAfter: previous?.status === status
-            ? previous.consumedAfter : parentEnds + 1 });
+          childStatus.set(childId, { status, snapshotAfter: previous?.status === status
+            ? previous.snapshotAfter : rosterRequests + 1 });
         }
         else
           childUsageMissing = true;
@@ -524,6 +523,7 @@ async function runAttempt(
     if (!session)
       return await outcome("create_failed",
                            created.error ?? `Unexpected create response: ${JSON.stringify(created).slice(0, 300)}`);
+    if (isObject(created.data) && typeof created.data.workerPid === "number") daemon.workers.add(created.data.workerPid);
     const sid = session.activeSessionId;
     selectedId = sid;
     const must = async (command: Record<string, unknown>&{type : string}) => {
@@ -567,6 +567,7 @@ async function runAttempt(
                              headless.error ?? "wait_for_headless_completion failed without an error text.");
     }
     for (;;) {
+      const snapshot = ++rosterRequests;
       const listed = await client.request({type : "list"}, 30_000);
       const rows = listed.success && isObject(listed.data) && Array.isArray(listed.data.sessions)
                      ? listed.data.sessions.filter(isObject)
@@ -584,7 +585,7 @@ async function runAttempt(
       if (!parent) return await outcome("prompt_failed", "Parent session missing from daemon list.");
       const actions = isObject(parent.sessionActions) ? parent.sessionActions : {};
       const childrenPending = parent.hasRunningSubagents === true || [...childStatus.values()].some(child =>
-        !["done", "completed", "error", "cancelled"].includes(child.status) || parentEnds < child.consumedAfter);
+        !["done", "completed", "error", "cancelled"].includes(child.status) || snapshot < child.snapshotAfter);
       const busy = childrenPending || parent.isSessionActive === true || parent.isStreaming === true ||
                    parent.isRunningTools === true || parent.isBashRunning === true ||
                    Number(actions.queuedCount ?? 0) > 0;

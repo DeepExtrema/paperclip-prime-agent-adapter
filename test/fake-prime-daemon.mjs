@@ -165,13 +165,17 @@ async function handle(socket, id, command) {
           }
           if (env.FAKE_DAEMON_DELAYED_CHILD !== "hang") setTimeout(() => {
             s.childRunning = false;
-            if (s.statsChild) emit(s, { type: "rlm_child_update", child: { activeSessionId: s.statsChild.id, status: "done" } });
-            emit(s, { type: "rlm_child_update", child: { activeSessionId: "delayed-child", status: "done" } });
+            const done = () => {
+              if (s.statsChild) emit(s, { type: "rlm_child_update", child: { activeSessionId: s.statsChild.id, status: "done" } });
+              emit(s, { type: "rlm_child_update", child: { activeSessionId: "delayed-child", status: "done" } });
+            };
+            if (!env.FAKE_DAEMON_LATE_DONE) done();
             setTimeout(() => {
               s.streaming = true;
               setTimeout(() => {
               const message = { role: "assistant", content: [{ type: "text", text: "CHILD SAID KESTREL-4" }], stopReason: "stop" };
               finishPrompt(s, [{ type: "message_end", message }, { type: "agent_end", messages: [message] }]);
+              if (env.FAKE_DAEMON_LATE_DONE) setTimeout(done, 500);
               }, 200);
             }, Number(env.FAKE_DAEMON_FOLLOWUP_GAP_MS ?? "0"));
           }, 2000);
