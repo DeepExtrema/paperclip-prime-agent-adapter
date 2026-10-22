@@ -18,7 +18,7 @@ import {
 } from "../types.js";
 import { assertPrimeModelListed, listPrimeModels } from "./models.js";
 import { isPrimeUnknownSessionError, parsePrimeJsonl } from "./parse.js";
-import { assertPrimeCwdAllowed, buildPrimeChildEnv, resolvePrimeRuntimeConfig, seedPrimeAgentDir } from "./runtime-config.js";
+import { assertPrimeCwdAllowed, buildPrimeChildEnv, resolvePrimeCommand, resolvePrimeRuntimeConfig, seedPrimeAgentDir } from "./runtime-config.js";
 import { decidePrimeResume, primeSessionCodec, readPrimeSessionHeader } from "./session.js";
 import { stagePrimeSkills } from "./skills.js";
 import { isSupportedPrimeVersion, readPrimeVersion } from "./version.js";
@@ -93,9 +93,10 @@ async function prepareRun(ctx: AdapterExecutionContext, startedAtMs: number): Pr
     throw new Error(`prime_agent_local runs only on the local Paperclip host in phase 1; refusing ${describeAdapterExecutionTarget(target)}.`);
   }
   throwIfAborted(ctx);
-  const runtime = resolvePrimeRuntimeConfig(ctx.config, ctx.agent, resolvePaperclipInstanceRootForAdapter());
-  const { cwd, env: paperclipEnv } = await buildPaperclipRunEnv(ctx, runtime);
-  const { env: childEnv } = buildPrimeChildEnv(process.env, runtime.agentDir, paperclipEnv);
+  const configured = resolvePrimeRuntimeConfig(ctx.config, ctx.agent, resolvePaperclipInstanceRootForAdapter());
+  const { cwd, env: paperclipEnv } = await buildPaperclipRunEnv(ctx, configured);
+  const { env: childEnv } = buildPrimeChildEnv(process.env, configured.agentDir, paperclipEnv);
+  const runtime = { ...configured, command: await resolvePrimeCommand(configured.command, childEnv) };
   throwIfAborted(ctx);
   const version = await readPrimeVersion({ command: runtime.command, env: childEnv, cwd });
   if (!isSupportedPrimeVersion(version)) {

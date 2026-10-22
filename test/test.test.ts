@@ -11,7 +11,7 @@ import type { PrimeAgentDirPlan, PrimeCredentialConfig, PrimeRuntimeConfig } fro
 // their frozen contracts (INTERFACES.md §2-§4, §8, §16 A8-A9, A16). version.ts is real and runs a fake CLI script.
 const mocks = vi.hoisted(() => ({
   resolvePrimeRuntimeConfig: vi.fn(), seedPrimeAgentDir: vi.fn(), createEphemeralPrimeAgentDir: vi.fn(), buildPrimeChildEnv: vi.fn(),
-  assertPrimeCwdAllowed: vi.fn(), listPrimeModels: vi.fn(), assertPrimeModelListed: vi.fn(),
+  assertPrimeCwdAllowed: vi.fn(), listPrimeModels: vi.fn(), assertPrimeModelListed: vi.fn(), resolvePrimeCommand: vi.fn(),
 }));
 vi.mock("../src/server/runtime-config.js", () => ({ ...mocks }));
 vi.mock("../src/server/models.js", () => ({ ...mocks }));
@@ -75,6 +75,7 @@ beforeEach(async () => {
     env: { PATH: "/usr/bin:/bin", ...extra, PRIME_AGENT_CODING_AGENT_DIR: plan.agentDir, PRIME_AGENT_TELEMETRY: "0" },
     droppedKeys: [],
   }));
+  mocks.resolvePrimeCommand.mockReset().mockImplementation(async (command: string) => command);
   mocks.seedPrimeAgentDir
     .mockReset()
     .mockImplementation(async (plan: PrimeAgentDirPlan) => ({ plan, auth: "host_auth_symlink", billingType: "subscription", notes: [] }));
@@ -177,6 +178,20 @@ describe("testEnvironment: CLI (INTERFACES.md §10)", () => {
     expect(mocks.buildPrimeChildEnv).toHaveBeenCalledWith(process.env, plan, {});
     expect(cleanups[0]).toHaveBeenCalledTimes(1);
     await expect(stat(ephemeralDirs[0]!)).rejects.toThrow(/ENOENT/);
+  });
+
+  it("resolves the default command through resolvePrimeCommand with the child env (service PATH without the CLI)", async () => {
+    mocks.resolvePrimeRuntimeConfig.mockImplementation(() => runtime({ command: "prime-agent" }));
+    const fallback = path.join(root, "bin", "prime-agent");
+    mocks.resolvePrimeCommand.mockImplementation(async (command: string, env: NodeJS.ProcessEnv) => {
+      expect(command).toBe("prime-agent");
+      expect(env.PRIME_AGENT_CODING_AGENT_DIR).toBe(ephemeralDirs[0]);
+      return fallback;
+    });
+    const result = await testEnvironment(ctx());
+    expect(mocks.resolvePrimeCommand).toHaveBeenCalledTimes(1);
+    expect(check(result, "prime_cli_found").message).toBe(`Prime CLI found: ${fallback}`);
+    expect(check(result, "prime_cli_version").level).toBe("info");
   });
 
   it("resolves a bare command name through the child env PATH", async () => {

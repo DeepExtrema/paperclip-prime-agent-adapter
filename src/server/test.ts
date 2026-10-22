@@ -13,6 +13,7 @@ import {
   assertPrimeCwdAllowed,
   buildPrimeChildEnv,
   createEphemeralPrimeAgentDir,
+  resolvePrimeCommand,
   resolvePrimeRuntimeConfig,
   seedPrimeAgentDir,
 } from "./runtime-config.js";
@@ -88,7 +89,7 @@ export async function testEnvironment(ctx: AdapterEnvironmentTestContext): Promi
   }
   try {
     const { env } = buildPrimeChildEnv(process.env, ephemeral.plan, runtime.env);
-    const command = runtime.command;
+    const command = await resolvePrimeCommand(runtime.command, env);
 
     let cliFound = false;
     try {

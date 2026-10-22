@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PrimeConfigError } from "../src/errors.js";
-import { resolvePrimeDefaultCommand, resolvePrimeRuntimeConfig } from "../src/server/runtime-config.js";
+import { resolvePrimeCommand, resolvePrimeDefaultCommand, resolvePrimeRuntimeConfig } from "../src/server/runtime-config.js";
 import { PRIME_THINKING_LEVELS } from "../src/types.js";
 const AGENT = { id: "agent-1", companyId: "company-1" };
 const INSTANCE_ROOT = "/srv/paperclip/instances/default";
@@ -154,5 +154,28 @@ describe("resolvePrimeRuntimeConfig effort alias (§16 A21)", () => {
     expect(thinkingOf({ thinkingEffort: "high", effort: "low" })).toBe("low");
     expect(thinkingOf({ thinking: "", thinkingEffort: "medium", effort: "low" })).toBeNull();
     expect(thinkingOf({ thinkingEffort: "", effort: "low" })).toBe("low");
+  });
+});
+
+describe("resolvePrimeCommand", () => {
+  let home: string;
+  beforeEach(async () => {
+    home = await fs.mkdtemp(path.join(os.tmpdir(), "prime-command-"));
+    vi.stubEnv("HOME", home);
+  });
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    await fs.rm(home, { recursive: true, force: true });
+  });
+  it("resolves the default command through the user-local fallback when the child PATH lacks it", async () => {
+    const fallbackBin = path.join(home, ".local", "bin");
+    await fs.mkdir(fallbackBin, { recursive: true });
+    const fallback = path.join(fallbackBin, "prime-agent");
+    await fs.writeFile(fallback, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    await expect(resolvePrimeCommand("prime-agent", { PATH: path.join(home, "empty") })).resolves.toBe(fallback);
+  });
+  it("leaves an explicitly configured command untouched even when it is not on PATH", async () => {
+    const configured = path.join(home, "custom", "prime-agent");
+    await expect(resolvePrimeCommand(configured, { PATH: path.join(home, "empty") })).resolves.toBe(configured);
   });
 });

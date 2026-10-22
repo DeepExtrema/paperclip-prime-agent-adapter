@@ -34,6 +34,11 @@ export async function resolvePrimeDefaultCommand(env: NodeJS.ProcessEnv = proces
   }
 }
 
+/** The configured command as-is; the bare default is resolved against the child PATH, then the user-local install. */
+export async function resolvePrimeCommand(command: string, childEnv: NodeJS.ProcessEnv): Promise<string> {
+  return command === PRIME_DEFAULT_COMMAND ? resolvePrimeDefaultCommand(childEnv) : command;
+}
+
 // §2 resolvePrimeRuntimeConfig
 const DEFAULT_GRACE_SEC = 20; // pi-local execute.ts:373
 const SAFE_PATH_SEGMENT = /^[A-Za-z0-9_-]+$/; // agent and company ids become agent dir path segments
@@ -111,7 +116,7 @@ export const resolvePrimeRuntimeConfig: ResolvePrimeRuntimeConfig = (config, age
   const extraArgs = asStringArray(config.extraArgs);
   const env = Object.entries(parseObject(config.env)).filter((entry): entry is [string, string] => typeof entry[1] === "string");
   return {
-    // Execute resolves against the child PATH; listModels uses resolvePrimeDefaultCommand for the server.
+    // The bare default is resolved per call site with resolvePrimeCommand (child PATH, then the user-local install).
     command: trimmedText(config.command) ?? PRIME_DEFAULT_COMMAND,
     modelRef, provider, model, thinking, cwd,
     instructionsFilePath: trimmedText(config.instructionsFilePath),
