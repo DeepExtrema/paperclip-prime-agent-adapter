@@ -30,6 +30,24 @@ scripts/install-local.sh --api-url http://127.0.0.1:3100/api
 
 The agent's `model` must be a `provider/modelId` value listed by `prime-agent model list`.
 
+### Creating an agent in the Paperclip UI
+
+After `install-local.sh`, **Prime Agent** appears in Paperclip's adapter list. Pick a model (the dropdown is filled from `prime-agent model list` under the host's Prime credentials) and run the environment test:
+
+![Setup wizard: connection successful](docs/images/setup-wizard-connection-successful.png)
+
+Every check should be green: working directory, CLI path and version, host Prime auth file, model list, configured model. Finish setup and the agent is ready for a task:
+
+![Setup wizard: agent ready](docs/images/setup-wizard-agent-ready.png)
+
+`runtime` defaults to `print`. Set `adapterConfig.runtime` to `"daemon"` (Edit configuration → JSON, or the API) for runs that need Prime's delegation (`rlm.spawn`), goals/autonomy and memory; see the daemon row under Qualification for what is and is not covered.
+
+**If the test reports `Command not found in PATH: "prime-agent"`:**
+
+![Setup wizard: CLI missing](docs/images/setup-wizard-cli-missing.png)
+
+Paperclip is running as a service whose `PATH` lacks the directory holding `prime-agent`. Since commit `691ee1e` the adapter falls back to `~/.local/bin/prime-agent` on its own; if Prime is installed elsewhere, set `adapterConfig.command` to the absolute path. After upgrading the adapter, restart the Paperclip service so the new build is loaded (the API re-install alone does not reload cached modules).
+
 ## Documentation
 
 - [Install](docs/install.md)
