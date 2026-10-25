@@ -66,7 +66,8 @@ try {
   const first = reqs[r0];
   show("parent: <available_skills> names", names(first?.system ?? ""));
   show("parent: markers in the first request (system and messages)", found(JSON.stringify(all[r0] ?? {})));
-  const byUser = (needle) => reqs.findIndex((r, i) => i > r0 && (r.lastUserText ?? "").includes(needle));
+  // The parent's own later requests repeat the BEGINCMD text, which holds both needles; skip them (Sentinel, TAI-337).
+  const byUser = (needle) => reqs.findIndex((r, i) => i > r0 && (r.lastUserText ?? "").includes(needle) && !(r.lastUserText ?? "").includes("BEGINCMD"));
   for (const [label, needle] of [["depth-1 child", "child-reply"], ["create_session session", "session-reply"]]) {
     const i = byUser(needle);
     show(`${label}: <available_skills> names`, i < 0 ? "(no request found)" : names(reqs[i].system ?? ""));
