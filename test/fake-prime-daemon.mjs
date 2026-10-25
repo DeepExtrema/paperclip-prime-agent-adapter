@@ -39,6 +39,11 @@ const PROCESSING = "Agent is already processing. Specify streamingBehavior ('ste
 const sessions = new Map();
 let nextSession = 0;
 const clients = new Set();
+// TAI-273 §2.2 item 2: roster_subscribe clients get roster_update {changed, removed} (N0 item 5).
+const subscribers = new Set();
+const rosterItem = (s) => ({ agentId: s.sessionId, summary: summary(s), status: s.prompted ? "live" : "idle", workerId: s.id });
+const rosterChanged = (s) => { for (const c of subscribers) send(c, { type: "roster_update", changed: [rosterItem(s)] }); };
+const rosterRemoved = (id) => { for (const c of subscribers) send(c, { type: "roster_update", changed: [], removed: [id] }); };
 const send = (socket, message) => { if (!socket.destroyed) socket.write(`${JSON.stringify(message)}\n`); };
 const eventsOf = () => (env.FAKE_DAEMON_EVENTS_FILE ? readFileSync(env.FAKE_DAEMON_EVENTS_FILE, "utf8").split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l)).filter((e) => e.type !== "session") : []);
 const usageOf = (events) => {
@@ -63,7 +68,9 @@ function summary(s) {
   return { id: s.id, activeSessionId: s.id, lifecycle: s.prompted ? "live" : "draft", activity: s.streaming ? "working" : "idle",
     rlmDepth: s.depth ?? 0, sessionId: s.sessionId, sessionFile: s.sessionFile, cwd: s.cwd, thinkingLevel: s.thinking,
     model: { id: s.model, provider: s.provider }, isSessionActive: s.streaming, isStreaming: s.streaming, isCompacting: false, isBashRunning: false,
-    hasRunningSubagents: s.childRunning || env.FAKE_DAEMON_SUBAGENTS_RUNNING === "1", attachedClients: s.clients.size, messageCount: s.messages, workerState: "ready", workerPid };
+    hasRunningSubagents: s.childRunning || env.FAKE_DAEMON_SUBAGENTS_RUNNING === "1", attachedClients: s.clients.size, messageCount: s.messages, workerState: "ready", workerPid,
+    isQuotaParked: s.quotaParked === true, ...(s.parentActive ? { parentActiveSessionId: s.parentActive } : {}), ...(s.rlmChildId ? { rlmChildId: s.rlmChildId } : {}),
+    runtimeKind: (s.depth ?? 0) > 0 ? "subagent" : "top-level" };
 }
 function emit(s, event) {
   s.seq += 1;
@@ -81,6 +88,7 @@ function create(command, depth = 0) {
   const config = command.config ?? {};
   const sessionPath = command.sessionPath;
   for (const s of sessions.values()) if (sessionPath && s.sessionFile === sessionPath) return s;
+  if (sessionPath && env.FAKE_DAEMON_CREATE_ERROR) return env.FAKE_DAEMON_CREATE_ERROR;
   let sessionId = `fake-session-${process.pid}-${++nextSession}`;
   if (sessionPath && existsSync(sessionPath)) sessionId = JSON.parse(readFileSync(sessionPath, "utf8").split("\n")[0]).id;
   const sessionFile = sessionPath ?? path.join(config.sessionDir, `${sessionId}.jsonl`);
@@ -95,6 +103,31 @@ function create(command, depth = 0) {
     stats: initial, last: null, clients: new Set(), pending: null, rlmMaxDepth: 2 };
   sessions.set(s.id, s);
   return s;
+}
+// An ended session leaves the roster. FAKE_DAEMON_WAKE_ENDED_MS: the parent wakes it again later, under a new activeSessionId.
+function endSession(s) {
+  sessions.delete(s.id);
+  rosterRemoved(s.id);
+  if (env.FAKE_DAEMON_WAKE_ENDED_MS && s.depth !== undefined) setTimeout(() => {
+    const woken = { ...s, id: `w${s.id}`.slice(0, 12), parentActive: null, streaming: true, clients: new Set() };
+    sessions.set(woken.id, woken);
+    rosterChanged(woken);
+  }, Number(env.FAKE_DAEMON_WAKE_ENDED_MS));
+}
+// FAKE_DAEMON_SPAWN: JSON list of depths. Each entry is one more session started during the parent's turn, with one audited turn.
+function spawnSessions(parent) {
+  parent.spawned = [];
+  for (const depth of JSON.parse(env.FAKE_DAEMON_SPAWN ?? "[]")) {
+    const child = create({ config: parent.config }, depth);
+    parent.spawned.push(child);
+    child.depth = depth;
+    child.running = true;
+    if (depth > 0) { child.parentActive = parent.id; child.rlmChildId = `sub-${child.id}`; }
+    appendTurn(child, { role: "assistant", content: [{ type: "text", text: "OK" }], stopReason: "stop", provider: child.provider,
+      model: env.FAKE_DAEMON_SPAWN_MODEL ?? child.model });
+    rosterChanged(child);
+    if (depth > 0) emit(parent, { type: "rlm_child_update", child: { activeSessionId: child.id, status: "running" } });
+  }
 }
 function finishPrompt(s, events) {
   for (const e of events) emit(s, e);
@@ -114,14 +147,31 @@ async function handle(socket, id, command) {
   const fail = (error) => send(socket, { id, type: "response", command: command.type, success: false, error });
   if (command.type === env.FAKE_DAEMON_REFUSE) return fail(`${command.type} refused`);
   const s = command.activeSessionId ? sessions.get(command.activeSessionId) : undefined;
-  const needSession = !["list", "create", "shutdown"].includes(command.type);
+  const needSession = !["list", "create", "shutdown", "roster_subscribe"].includes(command.type);
   if (needSession && !s) return fail(`Unknown active session: ${command.activeSessionId}`);
   switch (command.type) {
     case "list": return env.FAKE_DAEMON_BAD_ROSTER ? ok({ sessions: null }) : ok({ sessions: [...sessions.values()].map(summary) });
     case "create": {
       const authFile = path.join(command.config?.agentDir ?? "", "auth.json");
       record({ kind: "auth_at_create", auth: existsSync(authFile) ? JSON.parse(readFileSync(authFile, "utf8")) : null });
-      return ok(summary(create(command)));
+      const created = create(command);
+      if (typeof created === "string") return fail(created);
+      return ok(summary(created));
+    }
+    case "roster_subscribe":
+      subscribers.add(socket);
+      return ok({ roster: [...sessions.values()].map(rosterItem) });
+    case "cancel_rlm_child": {
+      const child = [...sessions.values()].find((c) => c.rlmChildId === command.childId);
+      if (child) child.running = false;
+      return ok({ cancelled: Boolean(child) });
+    }
+    case "delete_rlm_subagent": {
+      const child = [...sessions.values()].find((c) => c.rlmChildId === command.childId);
+      if (!child || env.FAKE_DAEMON_END_FAILS === "1") return ok({ deleted: false, reason: child ? "refused" : "unknown" });
+      if (child.running) return ok({ deleted: false, reason: "running" });
+      endSession(child);
+      return ok({ deleted: true });
     }
     case "attach": s.clients.add(socket); return ok({ activeSessionId: s.id, snapshot: { activeSessionId: s.id, summary: summary(s), messages: [] } });
     case "detach": s.clients.delete(socket); return ok();
@@ -148,11 +198,25 @@ async function handle(socket, id, command) {
     }
     case "prompt_and_wait": {
       if (s.streaming) return fail(PROCESSING);
+      if (command.message === "/goal clear") {
+        // N0 item 7: a slash command, no model request. FAKE_DAEMON_GOAL_CLEAR=ignore leaves the goal in place.
+        if (env.FAKE_DAEMON_GOAL_CLEAR !== "ignore") {
+          const command_ = { name: "goal", args: "clear", text: "/goal clear" };
+          appendFileSync(s.sessionFile, `${JSON.stringify({ type: "custom_message", customType: "session_slash_command_result", content: "Goal cleared.", details: { command: command_, success: true } })}\n`);
+          appendFileSync(s.sessionFile, `${JSON.stringify({ type: "custom", customType: "thread_goal_state", data: { active: false, status: "idle" } })}\n`);
+        }
+        return ok();
+      }
       s.prompted = true;
       const mode = env.FAKE_DAEMON_PROMPT_MODE ?? "ok";
       if (mode === "busy") return fail(PROCESSING);
       if (env.FAKE_DAEMON_EDIT_SETTINGS) mergeJson(path.join(s.config.agentDir, "settings.json"), JSON.parse(env.FAKE_DAEMON_EDIT_SETTINGS));
       if (env.FAKE_DAEMON_EDIT_AUTH) mergeJson(path.join(s.config.agentDir, "auth.json"), JSON.parse(env.FAKE_DAEMON_EDIT_AUTH));
+      // FAKE_DAEMON_WRITE_FILES: {absolute path: content}, written by "the agent" during its turn.
+      for (const [file, content] of Object.entries(JSON.parse(env.FAKE_DAEMON_WRITE_FILES ?? "{}"))) {
+        mkdirSync(path.dirname(file), { recursive: true });
+        writeFileSync(file, content);
+      }
       if (env.FAKE_DAEMON_AUDIT_CHILD) {
         // A finished depth-1 child whose turns come from FAKE_DAEMON_AUDIT_CHILD (a JSON list of assistant messages).
         // Its update carries no sessionFile; the adapter finds the file through get_session_stats and list.
@@ -178,12 +242,19 @@ async function handle(socket, id, command) {
         return fail(error);
       }
       s.streaming = true;
+      if (env.FAKE_DAEMON_QUOTA_PARKED === "1") { s.quotaParked = true; rosterChanged(s); }
+      spawnSessions(s);
       if (mode === "hang" || mode === "hang_hard") {
         emit(s, { type: "agent_start" });
         s.pending = { ok, fail, mode };
         return undefined;
       }
       setTimeout(() => {
+        for (const child of s.spawned ?? []) {
+          if (!child.running || !sessions.has(child.id)) continue;
+          child.running = false;
+          if (child.depth > 0) emit(s, { type: "rlm_child_update", child: { activeSessionId: child.id, status: "done" } });
+        }
         if (env.FAKE_DAEMON_CHILD_INSIDE) emit(s, { type: "rlm_child_update", child: { activeSessionId: "inside", status: "done" } });
         finishPrompt(s, eventsOf());
         if (env.FAKE_DAEMON_DELAYED_CHILD) {
@@ -229,9 +300,10 @@ async function handle(socket, id, command) {
       return undefined;
     }
     case "kill": {
+      if (env.FAKE_DAEMON_END_FAILS === "1" && s.depth !== undefined) return ok();
       if (s.pending) { const p = s.pending; s.pending = null; p.fail(`Active session ${s.id} closed`); }
       for (const c of s.clients) send(c, { type: "session_closed", activeSessionId: s.id, reason: "killed" });
-      sessions.delete(s.id);
+      endSession(s);
       return ok();
     }
     case "shutdown":
@@ -265,7 +337,7 @@ const server = net.createServer((socket) => {
       void handle(socket, message.id, message.command);
     }
   });
-  socket.on("close", () => { clients.delete(socket); for (const s of sessions.values()) s.clients.delete(socket); });
+  socket.on("close", () => { clients.delete(socket); subscribers.delete(socket); for (const s of sessions.values()) s.clients.delete(socket); });
   socket.on("error", () => undefined);
 });
 function shutdown() {

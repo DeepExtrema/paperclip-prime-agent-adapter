@@ -19,6 +19,8 @@ import {
 import {
   finishPrimeRun, notePrimeParent, preparePrimeSettings, resolvePrimeModelPolicy, startPrimeAudit, type PrimeAuditSources, type PrimeModelPolicy,
 } from "./model-policy.js";
+import { primeGovernedManagedKeys, resolvePrimeFeatureProfile, type PrimeFeatureProfile } from "./feature-profile.js";
+import { finishGovernedRun, startGovernedRun, type GovernedRunState } from "./governed-run.js";
 import { finishPrimeManagedCredential, resolvePrimeManagedConnection, type PrimeManagedBinding } from "./managed-connection.js";
 import { assertPrimeModelListed, listPrimeModels } from "./models.js";
 import { isPrimeUnknownSessionError, parsePrimeJsonl, primeProviderErrorCode } from "./parse.js";
@@ -43,6 +45,8 @@ export const buildPrimeArgs: BuildPrimeArgs = (input) => {
 export type PreparedRun = {
   runtime: PrimeRuntimeConfig; cwd: string; paperclipEnv: Record<string, string>; childEnv: Record<string, string | undefined>;
   seeded: SeededPrimeAgentDir; skills: StagedPrimeSkills; deadlineMs: number | null; policy: PrimeModelPolicy;
+  /** TAI-273 §2.2: featureProfile "governed-v1", or null. */
+  profile: PrimeFeatureProfile | null;
 };
 type Attempt = { proc: RunProcessResult; parsed: ParsedPrimeOutput };
 export type SystemPrompt = { text: string; notes: string[]; ownsDefaultPolicy: boolean };
@@ -83,7 +87,7 @@ const throwIfAborted = (ctx: AdapterExecutionContext) => { if (ctx.signal?.abort
 const cancelledResult = (message: string): AdapterExecutionResult =>
   ({ exitCode: 1, signal: null, timedOut: false, errorCode: "prime_run_cancelled", errorMessage: message, clearSession: false });
 /** Codes that prove no provider work started (TAI-273 §3.2, §2.2): the host may treat the run as a bootstrap failure. */
-const BOOTSTRAP_CODES: readonly string[] = ["prime_managed_connection_invalid"];
+const BOOTSTRAP_CODES: readonly string[] = ["prime_managed_connection_invalid", "prime_feature_profile_invalid"];
 /** errorMeta.primeErrorCode: the `code` of any adapter error class (codes start with "prime_"), else null. A PrimePolicyError code is also the errorCode. */
 function preflightFailure(err: unknown): AdapterExecutionResult {
   if (err instanceof RunCancelledError) return cancelledResult(err.message);
@@ -107,10 +111,18 @@ async function prepareRun(ctx: AdapterExecutionContext, startedAtMs: number, nat
   throwIfAborted(ctx);
   const configured = resolvePrimeRuntimeConfig(ctx.config, ctx.agent, resolvePaperclipInstanceRootForAdapter());
   const policy = resolvePrimeModelPolicy(ctx.config, configured, native);
-  // TAI-273 §3.2: fail closed before any file is written.
+  // TAI-273 §2.2 and §3.2: fail closed before any file is written.
   const binding = resolvePrimeManagedConnection(ctx.config, { mode: configured.credential.mode, provider: configured.provider, allowedModels: policy.allowedModels });
+  const profile = resolvePrimeFeatureProfile(ctx.config, {
+    runtime: native.runtime, credentialMode: configured.credential.mode, allowedModels: policy.allowedModels, rlmMaxDepth: native.rlmMaxDepth,
+  });
+  if (profile) {
+    policy.managed = { ...policy.managed, ...primeGovernedManagedKeys(profile) };
+    policy.settingsAllowlist = true;
+  }
   const { cwd, env: paperclipEnv } = await buildPaperclipRunEnv(ctx, configured);
-  const { env: childEnv } = buildPrimeChildEnv(process.env, configured.agentDir, paperclipEnv, { stripAnthropicEnv: binding !== null });
+  const { env: childEnv } = buildPrimeChildEnv(process.env, configured.agentDir, paperclipEnv, { stripAnthropicEnv: profile !== null || binding !== null });
+  if (profile) childEnv.DO_NOT_TRACK = "1"; // §2.2 item 1, next to PRIME_AGENT_TELEMETRY=0
   const runtime = { ...configured, command: await resolvePrimeCommand(configured.command, childEnv) };
   throwIfAborted(ctx);
   const version = await readPrimeVersion({ command: runtime.command, env: childEnv, cwd });
@@ -126,7 +138,7 @@ async function prepareRun(ctx: AdapterExecutionContext, startedAtMs: number, nat
   throwIfAborted(ctx);
   const skills = await stagePrimeSkills(ctx.config);
   const deadlineMs = runtime.timeoutSec > 0 ? startedAtMs + runtime.timeoutSec * 1000 : null;
-  return { runtime, cwd, paperclipEnv, childEnv, seeded, skills, deadlineMs, policy };
+  return { runtime, cwd, paperclipEnv, childEnv, seeded, skills, deadlineMs, policy, profile };
 }
 /** pi-local execute.ts 574-635 (system prompt part). */
 async function buildSystemPrompt(ctx: AdapterExecutionContext, runtime: PrimeRuntimeConfig, cwd: string): Promise<SystemPrompt> {
@@ -253,6 +265,7 @@ function mapResult(attempt: Attempt, prep: PreparedRun, clearSession: boolean): 
 }
 async function runPrime(
   ctx: AdapterExecutionContext, prep: PreparedRun, native: PrimeNativeConfig, settingsNotes: string[], sources: PrimeAuditSources,
+  governed: GovernedRunState | null,
 ): Promise<AdapterExecutionResult> {
   const { runtime, cwd } = prep;
   const system = await buildSystemPrompt(ctx, runtime, cwd);
@@ -271,7 +284,7 @@ async function runPrime(
     );
   }
   const resumeSessionFile = decision.resume ? decision.sessionFile : null;
-  if (native.runtime === "daemon") return await executeDaemon({ ctx, prep, native, system, notes, resumeSessionFile, sources,
+  if (native.runtime === "daemon") return await executeDaemon({ ctx, prep, native, system, notes, resumeSessionFile, sources, governed,
     userPrompt: (resumed) => buildUserPrompt(ctx, runtime, system.ownsDefaultPolicy, resumed) });
   const audited = (attempt: Attempt) => {
     const { sessionId, usage } = attempt.parsed;
@@ -313,18 +326,23 @@ async function executeRun(ctx: AdapterExecutionContext, track: RunTrack): Promis
   }
   const settingsNotes: string[] = [];
   let settings;
+  let governed: GovernedRunState | null = null;
+  if (prep.profile) native = { ...native, rlmMaxDepth: prep.profile.rlmMaxDepth }; // §2.2 item 1: the per-session RPC as well
   try {
     settings = await preparePrimeSettings(prep.runtime.agentDir.agentDir, prep.policy, settingsNotes); // §9 items 1-2, before Prime starts
+    if (settings?.removedKeys?.length) await ctx.onLog("stdout", `[paperclip] settings.json: removed keys that are not allowed: ${settings.removedKeys.join(", ")}\n`);
+    // TAI-273 §2.2 items 4, 6, 8 and 9, before Prime starts.
+    if (prep.profile) governed = await startGovernedRun({ profile: prep.profile, agentDir: prep.runtime.agentDir.agentDir, cwd: prep.cwd, runId: ctx.runId });
   } catch (err) {
     await prep.skills.cleanup();
     return preflightFailure(err);
   }
-  const sources = await startPrimeAudit(prep.runtime.agentDir.sessionDir);
+  const sources = await startPrimeAudit(prep.runtime.agentDir.sessionDir, { includeTopLevel: prep.policy.allowedModels !== null });
   track.preflight = false;
   let result: AdapterExecutionResult;
   try {
     await ctx.onCancellationReady?.(); // A18: the host registers the execution control here
-    result = await runPrime(ctx, prep, native, settingsNotes, sources);
+    result = await runPrime(ctx, prep, native, settingsNotes, sources, governed);
   } catch (err) {
     if (err instanceof RunCancelledError) result = cancelledResult(err.message);
     else if (prep.policy.allowedModels === null) throw err;
@@ -333,5 +351,23 @@ async function executeRun(ctx: AdapterExecutionContext, track: RunTrack): Promis
     await prep.skills.cleanup();
   }
   // §9 items 3-5 run on every outcome: success, failure, cancel, timeout and uncertain.
-  return await finishPrimeRun(result, { policy: prep.policy, settings, credential: prep.runtime.credential, agentDir: prep.runtime.agentDir.agentDir, sources });
+  const finished = await finishPrimeRun(result, { policy: prep.policy, settings, credential: prep.runtime.credential, agentDir: prep.runtime.agentDir.agentDir, sources });
+  return governed ? await reportGovernedRun(ctx, finished, governed, settings?.removedKeys ?? []) : finished;
+}
+/** TAI-273 §2.2 item 3: resultJson.featureProfile, and one `[paperclip] warning:` line per warning. */
+async function reportGovernedRun(ctx: AdapterExecutionContext, result: AdapterExecutionResult, governed: GovernedRunState, removedAtStart: string[]) {
+  const settingsCheck = (result.resultJson as { settings?: { removedKeys?: string[] } } | undefined)?.settings;
+  const removedAtEnd = settingsCheck?.removedKeys ?? [];
+  if (removedAtEnd.length > 0) await ctx.onLog("stdout", `[paperclip] settings.json: removed keys the run added that are not allowed: ${removedAtEnd.join(", ")}\n`);
+  let featureProfile: Record<string, unknown>;
+  try {
+    const report = await finishGovernedRun(governed, [...new Set([...removedAtStart, ...removedAtEnd])]);
+    for (const warning of report.warnings) await ctx.onLog("stdout", `[paperclip] warning: ${warning}\n`);
+    featureProfile = { ...report };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    await ctx.onLog("stdout", `[paperclip] warning: the governed-v1 run report failed: ${message}\n`);
+    featureProfile = { profile: governed.profile.profile, reportError: message };
+  }
+  return { ...result, resultJson: { ...(result.resultJson ?? {}), featureProfile } };
 }

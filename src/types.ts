@@ -423,5 +423,9 @@ export const PRIME_RESULT_ERROR_CODES = [
   "prime_provider_auth_failed",
   /** TAI-273 §3.2: the provider rate limit or usage limit (diagnostic kind "rate_limit", after Prime's retries). The session row is kept. */
   "prime_provider_quota",
+  /** TAI-273 §2.2: featureProfile is invalid, or its rules fail. Before any file is written. */
+  "prime_feature_profile_invalid",
+  /** TAI-273 §2.2 item 2: a session over maxSubagentsPerRun could not be ended, or an ended session ran again. */
+  "prime_subagent_limit_exceeded",
 ] as const;
 export type PrimeResultErrorCode = (typeof PRIME_RESULT_ERROR_CODES)[number];

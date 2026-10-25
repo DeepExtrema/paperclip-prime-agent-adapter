@@ -8,8 +8,10 @@ import net from "node:net";
 import {type ParsedPrimeOutput, PRIME_ADAPTER_TYPE, type PrimeSessionParams} from "../types.js";
 
 import { emitPrimeMeta, type PreparedRun, type SystemPrompt } from "./execute.js";
+import type { ForeignGoal, GovernedRunState } from "./governed-run.js";
 import { notePrimeChild, notePrimeParent, type PrimeAuditSources } from "./model-policy.js";
 import {parsePrimeJsonl, primeProviderErrorCode} from "./parse.js";
+import { PrimeSessionTracker, readPrimeRosterRow, type PrimeTrackerViolation } from "./session-cap.js";
 
 export type PrimeDaemonErrorCode =|"prime_daemon_start_failed"|"prime_daemon_socket_unsafe"|
   "prime_daemon_protocol_error"|"prime_daemon_closed"|"prime_daemon_request_timeout";
@@ -285,12 +287,17 @@ type RunDaemon = {
   pid: number; socketPath: string; stderrTail: string; client: PrimeDaemonClient;
   workers: Set<number>; stopDaemon: () => Promise<void>;
 };
-/** Daemon roster rows below the parent are children; their session files feed the model audit. */
+/**
+ * Daemon roster rows below the parent are children; their session files feed the model audit. With allowedModels set,
+ * every session other than the parent is a source, depth 0 included (TAI-273 §2.2 item 2, rlm.create_session).
+ */
 function noteRosterChildren(sources: PrimeAuditSources | undefined, rows: unknown[]) {
   for (const row of rows) {
-    if (!sources || !isObject(row) || typeof row.rlmDepth !== "number" || row.rlmDepth <= 0) continue;
+    if (!sources || !isObject(row) || typeof row.rlmDepth !== "number") continue;
     const id = str(row.activeSessionId);
-    if (id) notePrimeChild(sources, id, { sessionFile: str(row.sessionFile), depth: row.rlmDepth });
+    if (!id) continue;
+    if (row.rlmDepth <= 0 && (!sources.includeTopLevel || str(row.sessionId) === sources.parent?.sessionId)) continue;
+    notePrimeChild(sources, id, { sessionFile: str(row.sessionFile), depth: row.rlmDepth });
   }
 }
 export async function startDaemon(ctx: AdapterExecutionContext, prep: PreparedRun, sources?: PrimeAuditSources): Promise<RunDaemon> {
@@ -361,12 +368,13 @@ export async function startDaemon(ctx: AdapterExecutionContext, prep: PreparedRu
     return { pid: child.pid!, socketPath, get stderrTail() { return stderrTail; }, client, workers, stopDaemon };
   } catch (err) { await stopDaemon(); throw err; }
 }
-type Stage = "create_failed" | "prompt_failed" | "completed" | "closed" | "timed_out" | "cancelled";
+type Stage = "create_failed" | "prompt_failed" | "completed" | "closed" | "timed_out" | "cancelled" | "policy_failed";
 type StatsDelta = { input: number; output: number; cacheRead: number; cacheWrite: number; total: number; cost: number };
 type SessionSummary = { activeSessionId: string; sessionId: string; sessionFile: string; provider: string | null; model: string | null; thinkingLevel: string | null };
 type Outcome = {
   stage: Stage; error: string | null; stdout: string; parsed: ParsedPrimeOutput; session: SessionSummary | null;
   lastText: string | null; statsDelta: StatsDelta | null; autonomousStatus: unknown; usageNote?: string;
+  violation?: PrimeTrackerViolation;
 };
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const str = (value: unknown) => (typeof value === "string" && value.length > 0 ? value : null);
@@ -409,10 +417,11 @@ function createConfig(prep: PreparedRun, native: PrimeNativeConfig, system: Syst
   };
 }
 
+type StopReason = "cancelled" | "timed_out" | "policy";
 function watchStop(ctx: AdapterExecutionContext, prep: PreparedRun, client: PrimeDaemonClient, activeSessionId: string) {
-  let reason: "cancelled" | "timed_out" | null = null;
+  let reason: StopReason | null = null;
   const timers: NodeJS.Timeout[] = [];
-  const fire = (why: "cancelled" | "timed_out") => {
+  const fire = (why: StopReason) => {
     if (reason) return; reason = why;
     void client.request({ type: "abort", activeSessionId }, 1000).catch(() => undefined);
     timers.push(setTimeout(() => client.close(), prep.runtime.graceSec * 1000));
@@ -420,12 +429,31 @@ function watchStop(ctx: AdapterExecutionContext, prep: PreparedRun, client: Prim
   const onAbort = () => fire("cancelled");
   if (ctx.signal?.aborted) fire("cancelled"); ctx.signal?.addEventListener("abort", onAbort, { once: true });
   if (prep.deadlineMs !== null) timers.push(setTimeout(() => fire("timed_out"), Math.max(1, prep.deadlineMs - Date.now())));
-  return { reason: () => reason, dispose: () => {
+  return { reason: () => reason, fire, dispose: () => {
     ctx.signal?.removeEventListener("abort", onAbort);
     for (const timer of timers) clearTimeout(timer);
   } };
 }
-function pendingStop(ctx: AdapterExecutionContext, prep: PreparedRun): "cancelled"|"timed_out"|null {
+
+/** TAI-273 §2.2 item 7: the newest thread_goal_state entry, and how many successful `/goal clear` results the file holds. */
+async function readGoalState(sessionFile: string): Promise<{ goal: Record<string, unknown> | null; clears: number }> {
+  let text = "";
+  try { text = await fs.readFile(sessionFile, "utf8"); } catch { return { goal: null, clears: 0 }; }
+  let goal: Record<string, unknown> | null = null;
+  let clears = 0;
+  for (const line of text.split("\n")) {
+    if (!line.includes("thread_goal_state") && !line.includes("session_slash_command_result")) continue;
+    let entry: unknown;
+    try { entry = JSON.parse(line); } catch { continue; }
+    if (!isObject(entry)) continue;
+    if (entry.type === "custom" && entry.customType === "thread_goal_state" && isObject(entry.data)) goal = entry.data;
+    const command = isObject(entry.details) && isObject(entry.details.command) ? entry.details.command : null;
+    if (entry.type === "custom_message" && entry.customType === "session_slash_command_result" && command?.name === "goal"
+      && command.args === "clear" && isObject(entry.details) && entry.details.success === true) clears += 1;
+  }
+  return { goal, clears };
+}
+function pendingStop(ctx: AdapterExecutionContext, prep: PreparedRun): StopReason|null {
   if (ctx.signal?.aborted) return "cancelled";
   return prep.deadlineMs !== null && Date.now() >= prep.deadlineMs ? "timed_out" : null;
 }
@@ -439,6 +467,7 @@ async function runAttempt(
   resumeSessionFile: string | null,
   userPrompt: (resumed: boolean) => string,
   sources: PrimeAuditSources,
+  governed: GovernedRunState | null,
   ): Promise<Outcome> {
   const {runtime, cwd} = prep;
   let stdout = "";
@@ -456,18 +485,25 @@ async function runAttempt(
   let terminalSessionError: string | null = null;
   let prompted = false;
   let stop: ReturnType<typeof watchStop>|null = null;
-  const stopReason = () => stop?.reason() ?? pendingStop(ctx, prep);
-  const outcome = async(stage: Stage, error: string | null, extra: Partial<Outcome> = {}): Promise<Outcome> => {
+  let tracker: PrimeSessionTracker | null = null;
+  let violation: PrimeTrackerViolation | null = null;
+  const stopReason = (): StopReason | null => (violation ? "policy" : null) ?? stop?.reason() ?? pendingStop(ctx, prep);
+  const outcome = async(stage: Stage | StopReason, error: string | null, extra: Partial<Outcome> = {}): Promise<Outcome> => {
     await logChain;
     const reason = stopReason();
-    if (reason) {
+    if (reason === "policy") {
+      stage = "policy_failed";
+      extra = { ...extra, violation: violation! };
+    } else if (reason) {
       stage = reason;
+    } else if (stage === "policy") {
+      stage = "policy_failed";
     } else if (stage === "completed" && terminalSessionError !== null) {
       stage = "closed";
       error = `${terminalSessionError} Daemon stderr: ${daemon.stderrTail}`;
     }
     return {
-      stage,
+      stage: stage as Stage,
       error,
       stdout,
       parsed : parsePrimeJsonl(stdout),
@@ -489,9 +525,15 @@ async function runAttempt(
       client.close(); // Reject local waits only; no session/daemon command.
     };
     unsubscribe = client.onMessage((message) => {
+      // TAI-273 §2.2 item 2: roster_update {changed, removed, resync} feeds the session cap (N0 item 5).
+      if (message.type === "roster_update") {
+        if (Array.isArray(message.changed)) tracker?.ingest(message.changed);
+        if (message.resync === true) void tracker?.list();
+      } else if (message.type === "session_binding") void tracker?.list();
       if (message.type === "session_event" && isObject(message.event) && message.event.type === "rlm_child_update" &&
           isObject(message.event.child)) {
         const childId = str(message.event.child.activeSessionId);
+        if (childId && tracker && !childIds.has(childId)) void tracker.list();
         if (childId) {
           childIds.add(childId);
           const depth = message.event.child.rlmDepth;
@@ -511,19 +553,54 @@ async function runAttempt(
       } else if (selectedId === id && message.type === "session_event" && isObject(message.event))
         emit(`${JSON.stringify(message.event)}\n`);
     });
-    const created = await client.request({
-      type : "create",
-      lifecycle : "resident",
-      config,
-      ...(resumeSessionFile ? {sessionPath : resumeSessionFile} : {})
-    },
-                                         60_000);
-    session = created.success ? readSummary(created.data) : null;
-    if (!session)
-      return await outcome("create_failed",
-                           created.error ?? `Unexpected create response: ${JSON.stringify(created).slice(0, 300)}`);
-    if (isObject(created.data) && typeof created.data.workerPid === "number") daemon.workers.add(created.data.workerPid);
-    notePrimeParent(sources, { sessionId: session.sessionId, sessionFile: session.sessionFile });
+    // TAI-273 §2.2 item 7: a goal Paperclip did not set is read from the session file before create.
+    const savedGoal = governed && resumeSessionFile ? (await readGoalState(resumeSessionFile)).goal : null;
+    const foreign = savedGoal && (savedGoal.status === "active" || savedGoal.status === "paused")
+      && savedGoal.objective !== native.goal?.objective ? savedGoal : null;
+    const createSession = async (sessionPath: string | null): Promise<SessionSummary | string> => {
+      const created = await client.request({ type: "create", lifecycle: "resident", config, ...(sessionPath ? { sessionPath } : {}) }, 60_000);
+      const summary = created.success ? readSummary(created.data) : null;
+      if (!summary) return created.error ?? `Unexpected create response: ${JSON.stringify(created).slice(0, 300)}`;
+      if (isObject(created.data) && typeof created.data.workerPid === "number") daemon.workers.add(created.data.workerPid);
+      notePrimeParent(sources, { sessionId: summary.sessionId, sessionFile: summary.sessionFile });
+      return summary;
+    };
+    const setUp = async (summary: SessionSummary) => {
+      const must = async (command: Record<string, unknown>&{type : string}) => {
+        const response = await client.request({...command, activeSessionId : summary.activeSessionId}, 30_000);
+        if (!response.success)
+          throw new PrimeDaemonError("prime_daemon_protocol_error",
+                                     `${command.type} failed: ${response.error ?? "no error text"}`);
+        return response;
+      };
+      if (summary.provider !== runtime.provider || summary.model !== runtime.model)
+        await must({type : "set_model", provider : runtime.provider, modelId : runtime.model});
+      if (runtime.thinking !== null && summary.thinkingLevel !== runtime.thinking)
+        await must({type : "set_thinking_level", level : runtime.thinking});
+      if (native.rlmMaxDepth !== null) await must({type : "set_rlm_max_depth", maxDepth : native.rlmMaxDepth});
+    };
+    const first = await createSession(resumeSessionFile);
+    if (typeof first === "string") return await outcome("create_failed", first);
+    session = first;
+    await setUp(session);
+    let resumed = resumeSessionFile !== null;
+    if (foreign && governed) {
+      const record: ForeignGoal = { goalId: str(foreign.goalId), objective: String(foreign.objective ?? "").slice(0, 200), status: String(foreign.status), action: "cleared" };
+      governed.live.foreignGoals.push(record);
+      const before = await readGoalState(session.sessionFile);
+      const answer = await client.request({ type: "prompt_and_wait", activeSessionId: session.activeSessionId, message: "/goal clear", queueIfBusy: false }, 60_000);
+      const after = await readGoalState(session.sessionFile);
+      if (!answer.success || after.clears <= before.clears || after.goal?.active !== false) {
+        record.action = "fresh_session";
+        emit(`[paperclip] Prime session ${session.sessionId} holds a goal not set by Paperclip; starting a fresh session.\n`);
+        await client.request({ type: "kill", activeSessionId: session.activeSessionId }, 30_000);
+        const fresh = await createSession(null);
+        if (typeof fresh === "string") return await outcome("create_failed", fresh);
+        session = fresh;
+        await setUp(session);
+        resumed = false;
+      }
+    }
     const sid = session.activeSessionId;
     selectedId = sid;
     const must = async (command: Record<string, unknown>&{type : string}) => {
@@ -533,16 +610,29 @@ async function runAttempt(
                                    `${command.type} failed: ${response.error ?? "no error text"}`);
       return response;
     };
-    if (session.provider !== runtime.provider || session.model !== runtime.model)
-      await must({type : "set_model", provider : runtime.provider, modelId : runtime.model});
-    if (runtime.thinking !== null && session.thinkingLevel !== runtime.thinking)
-      await must({type : "set_thinking_level", level : runtime.thinking});
-    if (native.rlmMaxDepth !== null) await must({type : "set_rlm_max_depth", maxDepth : native.rlmMaxDepth});
     emit(`${
       JSON.stringify(
         {type : "session", version : 3, id : session.sessionId, timestamp : new Date().toISOString(), cwd})}\n`);
     await must({type : "attach"});
-    const prompt = userPrompt(resumeSessionFile !== null);
+    if (governed) {
+      // TAI-273 §2.2 item 2: count and cap every other session; the item 1 isQuotaParked backstop.
+      const parentRef = { activeSessionId: sid, sessionId: session.sessionId };
+      tracker = new PrimeSessionTracker({
+        client, parent: parentRef, cap: governed.profile.maxSubagentsPerRun,
+        onViolation: (found) => {
+          violation = found;
+          emit(`[paperclip] ${found.message}\n`);
+          stop?.fire("policy");
+        },
+        onLog: (line) => emit(line),
+        onRow: (row) => {
+          if (row.workerPid !== null) daemon.workers.add(row.workerPid);
+          if (row.sessionId !== parentRef.sessionId) notePrimeChild(sources, row.activeSessionId, { sessionFile: row.sessionFile, depth: row.depth });
+        },
+      });
+      await tracker.start();
+    }
+    const prompt = userPrompt(resumed);
     await emitPrimeMeta(ctx, prep, system,
       [...notes, `Prime daemon pid ${daemon.pid} (per run), socket ${daemon.socketPath}, session ${session.sessionId}.`],
       ["--mode", "daemon", "--daemon-socket", daemon.socketPath], prompt);
@@ -576,6 +666,7 @@ async function runAttempt(
       if (!rows) return await outcome("prompt_failed", listed.error ?? "Unexpected daemon list response.");
       for (const row of rows) if (typeof row.workerPid === "number") daemon.workers.add(row.workerPid);
       noteRosterChildren(sources, rows);
+      tracker?.ingest(rows);
       for (const row of rows) {
         if (typeof row.rlmDepth === "number" && row.rlmDepth > 0) {
           const id = str(row.activeSessionId);
@@ -586,8 +677,9 @@ async function runAttempt(
       const parent = rows.find(row => row.activeSessionId === sid);
       if (!parent) return await outcome("prompt_failed", "Parent session missing from daemon list.");
       const actions = isObject(parent.sessionActions) ? parent.sessionActions : {};
-      const childrenPending = parent.hasRunningSubagents === true || [...childStatus.values()].some(child =>
-        !["done", "completed", "error", "cancelled"].includes(child.status) || snapshot < child.snapshotAfter);
+      // A child the session cap ended may never report a final status (TAI-273 §2.2 item 2).
+      const childrenPending = parent.hasRunningSubagents === true || [...childStatus.entries()].some(([id, child]) => !tracker?.isEnded(id) &&
+        (!["done", "completed", "error", "cancelled"].includes(child.status) || snapshot < child.snapshotAfter));
       const busy = childrenPending || parent.isSessionActive === true || parent.isStreaming === true ||
                    parent.isRunningTools === true || parent.isBashRunning === true ||
                    Number(actions.queuedCount ?? 0) > 0;
@@ -600,6 +692,8 @@ async function runAttempt(
       }
       if (!busy) break; await delay(250);
     }
+    await tracker?.settle();
+    if (stopReason()) return await outcome(stopReason()!, null);
     const last = await client.request({type : "get_last_assistant_text", activeSessionId : sid}, 30_000);
     const after = readStats(await client.request({type : "get_session_stats", activeSessionId : sid}, 30_000));
     const statsDelta = delta(before, after);
@@ -630,6 +724,11 @@ async function runAttempt(
   } finally {
     stop?.dispose();
     unsubscribe?.();
+    tracker?.dispose();
+    if (governed && tracker) {
+      governed.live.sessions = tracker.sessions;
+      governed.live.sessionsEnded = tracker.sessionsEnded;
+    }
   }
 }
 function mapResult(o: Outcome, prep: PreparedRun, daemon: RunDaemon, clearSession: boolean): AdapterExecutionResult {
@@ -650,6 +749,7 @@ function mapResult(o: Outcome, prep: PreparedRun, daemon: RunDaemon, clearSessio
   };
   const fail = (errorCode: string, errorMessage: string): AdapterExecutionResult => ({ ...base, errorCode, errorMessage });
   switch (o.stage) {
+    case "policy_failed": return fail(o.violation!.code, o.violation!.message);
     case "timed_out": return { ...fail("prime_run_timeout", `Timed out after ${runtime.timeoutSec}s${o.error ? `: ${o.error}` : ""}`), exitCode: null, timedOut: true };
     case "cancelled": return fail("prime_run_cancelled", "Run cancelled.");
     case "closed": return fail("prime_run_uncertain", `Prime daemon connection lost; the run outcome is uncertain. ${o.error}`);
@@ -674,8 +774,9 @@ export async function executeDaemon(input: {
   resumeSessionFile : string | null;
   userPrompt : (resumed: boolean) => string;
   sources : PrimeAuditSources;
+  governed : GovernedRunState | null;
 }): Promise<AdapterExecutionResult> {
-  const {ctx, prep, native, system, notes, resumeSessionFile, userPrompt, sources} = input;
+  const {ctx, prep, native, system, notes, resumeSessionFile, userPrompt, sources, governed} = input;
   if (prep.runtime.extraArgs.length > 0)
     await ctx.onLog("stdout", '[paperclip] extraArgs are ignored with runtime "daemon".\n');
   let daemon: RunDaemon;
@@ -693,7 +794,7 @@ export async function executeDaemon(input: {
     };
   }
   try {
-    return mapResult(await runAttempt(ctx, prep, native, system, notes, daemon, resumeSessionFile, userPrompt, sources), prep,
+    return mapResult(await runAttempt(ctx, prep, native, system, notes, daemon, resumeSessionFile, userPrompt, sources, governed), prep,
                      daemon, false);
   } finally {
     await daemon.stopDaemon();

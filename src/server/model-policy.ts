@@ -5,6 +5,7 @@ import path from "node:path";
 import type { AdapterExecutionResult } from "@paperclipai/adapter-utils";
 import { PrimePolicyError, type PrimePolicyErrorCode } from "../errors.js";
 import type { PrimeCredentialConfig } from "../types.js";
+import { PRIME_DANGEROUS_SETTINGS_KEYS, PRIME_DISPLAY_ONLY_SETTINGS_KEYS } from "./feature-profile.js";
 
 /**
  * Settings keys of Prime 0.10.1 that each hold one model ("provider/modelId" or a bare id), besides the
@@ -23,6 +24,8 @@ export interface PrimeModelPolicy {
   managed: Record<string, unknown> | null;
   /** allowedModels unset, daemon runtime: the subagentDefaultModel write the adapter made before §9. */
   legacySubagentDefaultModel: string | null;
+  /** TAI-273 §2.2 item 5 (governed-v1): settings.json holds only the managed and display-only keys. */
+  settingsAllowlist?: boolean;
 }
 
 const isUnset = (value: unknown): boolean =>
@@ -103,6 +106,8 @@ export interface PrimeSettingsState {
   sha256Written: string;
   /** Managed keys present with another value before the run; the adapter put its value back. */
   restoredKeys: string[];
+  /** Item 5 (governed-v1): key names removed at run start; absent without the allowlist. */
+  removedKeys?: string[];
 }
 
 async function writePrivateJson(file: string, value: unknown): Promise<void> {
@@ -149,6 +154,12 @@ export async function preparePrimeSettings(agentDir: string, policy: PrimeModelP
   const managed = policy.managed;
   const differing = Object.keys(managed).filter((key) => !sameJson(current[key], managed[key]));
   const restoredKeys = differing.filter((key) => key in current);
+  if (policy.settingsAllowlist) {
+    const removedKeys = Object.keys(current).filter((key) => !isAllowedKey(managed, key));
+    if (differing.length > 0 || removedKeys.length > 0) await writePrivateJson(file, { ...allowedOnly(current, managed), ...managed });
+    if (restoredKeys.length > 0) notes.push(`settings.json: restored managed keys changed since the last run: ${restoredKeys.join(", ")}.`);
+    return { file, managed, sha256Written: sha256(await fs.readFile(file)), restoredKeys, removedKeys };
+  }
   if (differing.length > 0) await writePrivateJson(file, { ...current, ...managed });
   if (restoredKeys.length > 0) notes.push(`settings.json: restored managed keys changed since the last run: ${restoredKeys.join(", ")}.`);
   notes.push(`settings.json: allowedModels = ${policy.allowedModels!.join(", ")}; model roles ${PRIME_MODEL_ROLE_KEYS.map((key) => `${key} = ${managed[key]}`).join(", ")}.`);
@@ -162,14 +173,28 @@ export interface PrimeSettingsCheck {
   restoredKeys: string[];
   /** Managed keys whose value after the run differs from the written one. All of them when the file is gone or unreadable. */
   tamperedKeys: string[];
+  /** Item 5 (governed-v1): key names the run added that are not allowed; removed after the check. */
+  removedKeys?: string[];
+  /** Item 5: the removed keys on the dangerous list. Any one fails the run with prime_settings_tampered. */
+  dangerousKeys?: string[];
 }
 
-/** Item 3. */
+const isAllowedKey = (managed: Record<string, unknown>, key: string) =>
+  key in managed || (PRIME_DISPLAY_ONLY_SETTINGS_KEYS as readonly string[]).includes(key);
+const allowedOnly = (value: Record<string, unknown>, managed: Record<string, unknown>) =>
+  Object.fromEntries(Object.entries(value).filter(([key]) => isAllowedKey(managed, key)));
+
+/** Item 3; with the item 5 allowlist, the file is then rewritten to the allowed keys. */
 export async function checkPrimeSettings(state: PrimeSettingsState): Promise<PrimeSettingsCheck> {
   const read = await readSettings(state.file);
   const after = read.value;
   const tamperedKeys = Object.keys(state.managed).filter((key) => after === null || !sameJson(after[key], state.managed[key]));
-  return { file: state.file, sha256Written: state.sha256Written, sha256After: read.raw ? sha256(read.raw) : null, restoredKeys: state.restoredKeys, tamperedKeys };
+  const check: PrimeSettingsCheck = { file: state.file, sha256Written: state.sha256Written, sha256After: read.raw ? sha256(read.raw) : null, restoredKeys: state.restoredKeys, tamperedKeys };
+  if (state.removedKeys === undefined) return check;
+  const removedKeys = after === null ? [] : Object.keys(after).filter((key) => !isAllowedKey(state.managed, key));
+  if (removedKeys.length > 0) await writePrivateJson(state.file, allowedOnly(after!, state.managed));
+  const dangerousKeys = removedKeys.filter((key) => (PRIME_DANGEROUS_SETTINGS_KEYS as readonly string[]).includes(key));
+  return { ...check, removedKeys, dangerousKeys };
 }
 
 // Item 4: auth.json
@@ -219,6 +244,8 @@ export interface PrimeAuditSources {
   parent: ActorInfo & { sessionId: string | null; prompted: boolean } | null;
   /** Children the daemon reported, by activeSessionId. */
   children: Map<string, ActorInfo>;
+  /** TAI-273 §2.2 item 2: with allowedModels set, depth-0 sessions other than the parent (rlm.create_session) are audited too. */
+  includeTopLevel: boolean;
 }
 
 async function listSessionFiles(dir: string, into = new Map<string, FileStamp>()): Promise<Map<string, FileStamp>> {
@@ -233,9 +260,9 @@ async function listSessionFiles(dir: string, into = new Map<string, FileStamp>()
   return into;
 }
 
-export async function startPrimeAudit(sessionDir: string): Promise<PrimeAuditSources> {
+export async function startPrimeAudit(sessionDir: string, options: { includeTopLevel?: boolean } = {}): Promise<PrimeAuditSources> {
   const snapshot = await listSessionFiles(sessionDir).catch(() => new Map<string, FileStamp>());
-  return { sessionDir, snapshot, parent: null, children: new Map() };
+  return { sessionDir, snapshot, parent: null, children: new Map(), includeTopLevel: options.includeTopLevel === true };
 }
 
 const pick = <T>(next: T | null | undefined, previous: T | null): T | null => (next === undefined || next === null ? previous : next);
@@ -398,6 +425,9 @@ export async function finishPrimeRun(result: AdapterExecutionResult, input: {
   const failures: Array<{ code: PrimePolicyErrorCode; message: string }> = [];
   if (settingsCheck && settingsCheck.tamperedKeys.length > 0) {
     failures.push({ code: "prime_settings_tampered", message: `settings.json managed keys changed during the run: ${settingsCheck.tamperedKeys.join(", ")}.` });
+  }
+  if (settingsCheck?.dangerousKeys && settingsCheck.dangerousKeys.length > 0) {
+    failures.push({ code: "prime_settings_tampered", message: `settings.json gained keys during the run that are not allowed (removed): ${settingsCheck.dangerousKeys.join(", ")}.` });
   }
   if (authCheck && !authCheck.ok) failures.push({ code: "prime_auth_tampered", message: `auth.json after the run ${authCheck.problem}.` });
   if (!modelAudit.ok) failures.push({ code: "prime_model_audit_failed", message: `Model audit failed: ${describeAudit(modelAudit)}.` });

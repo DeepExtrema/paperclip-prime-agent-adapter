@@ -76,7 +76,9 @@ export type PrimePolicyErrorCode =
   /** TAI-273 §3.2: fail closed on the managed Claude subscription connection, before any file is written. */
   | "prime_managed_connection_invalid"
   /** TAI-273 §3.2: auth.json could not be deleted after a managed_subscription run. */
-  | "prime_auth_cleanup_failed";
+  | "prime_auth_cleanup_failed"
+  /** TAI-273 §2.2: featureProfile or maxSubagentsPerRun is invalid, or governed-v1 lacks allowedModels, daemon or its credential modes. */
+  | "prime_feature_profile_invalid";
 
 export class PrimePolicyError extends Error {
   readonly code: PrimePolicyErrorCode;
