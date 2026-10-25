@@ -351,6 +351,8 @@ export interface StagedPrimeSkills {
   skillDirs: string[];
   /** Runtime names that were desired but missing on disk (logged, not fatal). */
   missing: string[];
+  /** TAI-273 §4.1 (G1): one `[paperclip]` line per skill staged under its runtime name instead of its frontmatter name. */
+  logLines: string[];
   /** Removes the temp dir. Never throws. */
   cleanup: () => Promise<void>;
 }

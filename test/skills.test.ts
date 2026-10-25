@@ -110,3 +110,45 @@ describe("failed skill staging (INTERFACES §9, R-27)", () => {
     expect(await fs.readdir(tmp)).toEqual([]);
   });
 });
+
+describe("G1: skills staged under their frontmatter name (TAI-273 §4.1)", () => {
+  async function source(dir: string, name: string | null) {
+    await fs.mkdir(path.join(sources, dir), { recursive: true });
+    await fs.writeFile(path.join(sources, dir, "SKILL.md"), name === null ? "# no frontmatter\n" : `---\nname: ${name}\ndescription: d\n---\n# body\n`);
+    return { key: `company/${dir}`, runtimeName: dir, source: path.join(sources, dir) };
+  }
+  it("stages a hashed runtime name under its frontmatter name, and keeps the runtime name with one log line otherwise", async () => {
+    const extra = [
+      await source("simplified-english--9876d8956d", "simplified-english"),
+      await source("goal--1111111111", "goal"),
+      await source("bad--2222222222", "Bad_Name"),
+      await source("dup-a--3333333333", "dup"),
+      await source("dup-b--4444444444", '"dup"'),
+    ];
+    const staged = await stagePrimeSkills(skillConfig(extra.map((entry) => entry.key), extra));
+    expect(staged.skillDirs.map((dir) => path.basename(dir))).toEqual([
+      "paperclip", "simplified-english", "goal--1111111111", "bad--2222222222", "dup-a--3333333333", "dup-b--4444444444",
+    ]);
+    expect(await fs.readFile(path.join(staged.skillDirs[1]!, "SKILL.md"), "utf8")).toContain("name: simplified-english");
+    expect(staged.logLines).toEqual([
+      '[paperclip] Skill "paperclip" is staged under its runtime name: its SKILL.md has no frontmatter name.\n',
+      '[paperclip] Skill "goal--1111111111" is staged under its runtime name: "goal" is a Prime built-in skill name.\n',
+      '[paperclip] Skill "bad--2222222222" is staged under its runtime name: its frontmatter name "Bad_Name" is not a valid Prime skill name.\n',
+      '[paperclip] Skill "dup-a--3333333333" is staged under its runtime name: another skill also has the name "dup".\n',
+      '[paperclip] Skill "dup-b--4444444444" is staged under its runtime name: another skill also has the name "dup".\n',
+    ]);
+    await staged.cleanup();
+  });
+  it("refuses names longer than 64 characters and names with --", async () => {
+    const extra = [await source("long--5555555555", "a".repeat(65)), await source("dash--6666666666", "two--parts")];
+    const staged = await stagePrimeSkills(skillConfig(extra.map((entry) => entry.key), extra));
+    expect(staged.skillDirs.map((dir) => path.basename(dir)).slice(1)).toEqual(["long--5555555555", "dash--6666666666"]);
+    await staged.cleanup();
+  });
+  it("listSkills reports the staged name next to the runtime name", async () => {
+    const extra = [await source("simplified-english--9876d8956d", "simplified-english")];
+    const snapshot = await listPrimeSkills(ctx(skillConfig([extra[0]!.key], extra)));
+    const entry = snapshot.entries.find((candidate) => candidate.key === extra[0]!.key);
+    expect(entry).toMatchObject({ runtimeName: "simplified-english--9876d8956d", locationLabel: "Prime skill name: simplified-english" });
+  });
+});

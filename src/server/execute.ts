@@ -137,6 +137,7 @@ async function prepareRun(ctx: AdapterExecutionContext, startedAtMs: number, nat
   assertPrimeModelListed(runtime.modelRef, await listPrimeModels({ command: runtime.command, env: childEnv, cwd }));
   throwIfAborted(ctx);
   const skills = await stagePrimeSkills(ctx.config);
+  for (const line of skills.logLines) await ctx.onLog("stdout", line);
   const deadlineMs = runtime.timeoutSec > 0 ? startedAtMs + runtime.timeoutSec * 1000 : null;
   return { runtime, cwd, paperclipEnv, childEnv, seeded, skills, deadlineMs, policy, profile };
 }
