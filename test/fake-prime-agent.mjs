@@ -28,5 +28,15 @@ if (argv[0] === "--version") {
     if (chunkBytes > 0) await new Promise((resolve) => setTimeout(resolve, 5));
   }
   if (env.FAKE_PRIME_STDERR) process.stderr.write(env.FAKE_PRIME_STDERR);
+  if (env.FAKE_PRIME_WRITE_SESSION === "1") {
+    // TAI-225 §9 audit: the session header plus one message line per assistant message_end, as Prime writes them.
+    const events = text.split("\n").filter((line) => line.trim()).map((line) => JSON.parse(line));
+    const header = events.find((e) => e.type === "session");
+    const lines = [header, ...events.filter((e) => e.type === "message_end" && e.message?.role === "assistant").map((e) => ({ type: "message", message: e.message }))];
+    const { appendFileSync: append, mkdirSync } = await import("node:fs");
+    const dir = argv[argv.indexOf("--session-dir") + 1];
+    mkdirSync(dir, { recursive: true });
+    append(`${dir}/${header.id}.jsonl`, lines.map((line) => `${JSON.stringify(line)}\n`).join(""));
+  }
   process.exitCode = Number(env.FAKE_PRIME_EXIT_CODE ?? "0");
 }

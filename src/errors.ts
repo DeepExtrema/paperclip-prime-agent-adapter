@@ -61,6 +61,29 @@ export class PrimeCliError extends Error {
   }
 }
 
+/** TAI-225 rev 3 §9. Unlike the classes above, execute reports `code` itself as the run's errorCode. */
+export type PrimePolicyErrorCode =
+  /** settings.json exists but is not a JSON object (or cannot be read). The adapter does not write it. */
+  | "prime_settings_invalid"
+  /** allowedModels or modelRoles is malformed, or the model or a role is outside allowedModels. */
+  | "prime_allowed_models_invalid"
+  /** A managed settings key differs after the run from what the adapter wrote. */
+  | "prime_settings_tampered"
+  /** api_key mode: after the run auth.json is not a regular 0600 file holding only the configured provider. */
+  | "prime_auth_tampered"
+  /** An actor ran a model outside allowedModels, or an actor's model could not be read. */
+  | "prime_model_audit_failed";
+
+export class PrimePolicyError extends Error {
+  readonly code: PrimePolicyErrorCode;
+
+  constructor(code: PrimePolicyErrorCode, message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "PrimePolicyError";
+    this.code = code;
+  }
+}
+
 /** Thrown by WP0 stubs until the owning work package lands. */
 export function notImplemented(wp: string, what: string): never {
   throw new Error(`not implemented (${wp}): ${what}`);

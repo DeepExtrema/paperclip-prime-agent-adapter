@@ -249,6 +249,12 @@ async function readHostBillingType(hostAuthFile: string, provider: string): Prom
   }
 }
 
+/** host_auth checks without linking anything (environment test). Throws PrimeCredentialError as seedPrimeAgentDir does. */
+export async function inspectHostAuth(hostAuthFile: string, provider: string): Promise<SeededPrimeAgentDir["billingType"]> {
+  await assertHostAuthFile(hostAuthFile);
+  return readHostBillingType(hostAuthFile, provider);
+}
+
 export const seedPrimeAgentDir: SeedPrimeAgentDir = async (plan, input) => {
   await assertAgentDirLocation(plan.agentDir);
   await ensurePrivateDir(plan.agentDir);
@@ -260,6 +266,9 @@ export const seedPrimeAgentDir: SeedPrimeAgentDir = async (plan, input) => {
   const notes = [`Prime agent dir: ${plan.agentDir} (${plan.kind}).`];
   const credential = plan.credential;
   if (credential.mode === "host_auth") {
+    // TAI-225 §9 item 8: Prime 0.10 replaces the link with a regular file when it refreshes the token, and a temp dir
+    // is then deleted with the only copy of the new token. The host login is linked into durable agent dirs only.
+    if (plan.kind !== "agent") unsafeAgentDir(`The host Prime login is never linked into a temporary agent dir (${plan.agentDir}).`);
     await assertHostAuthFile(credential.hostAuthFile);
     await linkHostAuth(authFile, credential.hostAuthFile);
     notes.push(`auth.json -> ${credential.hostAuthFile} (host Prime credential).`);
@@ -277,8 +286,10 @@ export const seedPrimeAgentDir: SeedPrimeAgentDir = async (plan, input) => {
   if (written.isSymbolicLink() || !isPrivateRegularFile(written)) {
     throw new PrimeCredentialError("prime_auth_file_unsafe", `${authFile} must be a regular file owned by this user with mode 0600.`);
   }
-  notes.push(`auth.json written from ${credential.apiKeyEnvVar} for provider ${credential.provider}.`);
-  return { plan, auth: "api_key_file", billingType: "api", notes };
+  // TAI-225 §9 item 6: a Claude subscription token (`claude setup-token`) is billed to the subscription, not per call.
+  const billingType = key.startsWith("sk-ant-oat") ? "subscription" : "api";
+  notes.push(`auth.json written from ${credential.apiKeyEnvVar} for provider ${credential.provider} (billing: ${billingType}).`);
+  return { plan, auth: "api_key_file", billingType, notes };
 };
 
 export const createEphemeralPrimeAgentDir: CreateEphemeralPrimeAgentDir = async (credential) => {
@@ -319,8 +330,10 @@ export const buildPrimeChildEnv: BuildPrimeChildEnv = (base, plan, paperclipEnv)
     if (strip) dropped.add(key);
     env[key] = strip ? undefined : value;
   }
+  // TAI-225 §9 item 7: the api_key value reaches Prime only through auth.json, never through the kernel's or bash's environment.
+  const apiKeyEnvVar = plan.credential.mode === "api_key" ? plan.credential.apiKeyEnvVar : null;
   for (const [key, value] of Object.entries(paperclipEnv)) {
-    const strip = hasPrefix(key, PRIME_ALWAYS_STRIPPED_ENV_PREFIXES) || OWNED_KEYS.includes(key);
+    const strip = hasPrefix(key, PRIME_ALWAYS_STRIPPED_ENV_PREFIXES) || OWNED_KEYS.includes(key) || key === apiKeyEnvVar;
     if (strip) dropped.add(key);
     env[key] = strip ? undefined : value;
   }

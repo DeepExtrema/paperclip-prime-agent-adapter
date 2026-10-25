@@ -11,11 +11,14 @@ import {
   type RunProcessResult,
 } from "@paperclipai/adapter-utils/server-utils";
 import { executeDaemon, resolvePrimeNativeConfig, type PrimeNativeConfig } from "./execute-daemon.js";
-import { PrimeCliError } from "../errors.js";
+import { PrimeCliError, PrimePolicyError } from "../errors.js";
 import {
   PRIME_ADAPTER_TYPE, PRIME_SUPPORTED_VERSION_RANGE, type BuildPrimeArgs, type ParsedPrimeOutput, type PrimeRuntimeConfig,
   type PrimeSessionParams, type SeededPrimeAgentDir, type StagedPrimeSkills,
 } from "../types.js";
+import {
+  finishPrimeRun, notePrimeParent, preparePrimeSettings, resolvePrimeModelPolicy, startPrimeAudit, type PrimeAuditSources, type PrimeModelPolicy,
+} from "./model-policy.js";
 import { assertPrimeModelListed, listPrimeModels } from "./models.js";
 import { isPrimeUnknownSessionError, parsePrimeJsonl } from "./parse.js";
 import { assertPrimeCwdAllowed, buildPrimeChildEnv, resolvePrimeCommand, resolvePrimeRuntimeConfig, seedPrimeAgentDir } from "./runtime-config.js";
@@ -38,7 +41,7 @@ export const buildPrimeArgs: BuildPrimeArgs = (input) => {
 /** childEnv: §16 A8, stripped inherited keys are present as undefined; it reaches runChildProcess unchanged. paperclipEnv: A18 onMeta keys. */
 export type PreparedRun = {
   runtime: PrimeRuntimeConfig; cwd: string; paperclipEnv: Record<string, string>; childEnv: Record<string, string | undefined>;
-  seeded: SeededPrimeAgentDir; skills: StagedPrimeSkills; deadlineMs: number | null;
+  seeded: SeededPrimeAgentDir; skills: StagedPrimeSkills; deadlineMs: number | null; policy: PrimeModelPolicy;
 };
 type Attempt = { proc: RunProcessResult; parsed: ParsedPrimeOutput };
 export type SystemPrompt = { text: string; notes: string[]; ownsDefaultPolicy: boolean };
@@ -78,22 +81,26 @@ class RunCancelledError extends Error {}
 const throwIfAborted = (ctx: AdapterExecutionContext) => { if (ctx.signal?.aborted) throw new RunCancelledError("Run cancelled before prime-agent started."); };
 const cancelledResult = (message: string): AdapterExecutionResult =>
   ({ exitCode: 1, signal: null, timedOut: false, errorCode: "prime_run_cancelled", errorMessage: message, clearSession: false });
-/** errorMeta.primeErrorCode: the `code` of any adapter error class (codes start with "prime_"), else null. */
+/** errorMeta.primeErrorCode: the `code` of any adapter error class (codes start with "prime_"), else null. A PrimePolicyError code is also the errorCode. */
 function preflightFailure(err: unknown): AdapterExecutionResult {
   if (err instanceof RunCancelledError) return cancelledResult(err.message);
+  if (err instanceof PrimePolicyError) {
+    return { exitCode: 1, signal: null, timedOut: false, errorCode: err.code, errorMessage: err.message, errorMeta: { primeErrorCode: err.code }, clearSession: false };
+  }
   const code = err instanceof Error ? (err as Error & { code?: unknown }).code : undefined;
   const primeErrorCode = typeof code === "string" && code.startsWith("prime_") ? code : null;
   const errorMessage = err instanceof Error ? err.message : String(err);
   return { exitCode: 1, signal: null, timedOut: false, errorCode: "prime_preflight_failed", errorMessage, errorMeta: { primeErrorCode }, clearSession: false };
 }
 /** INTERFACES §11.3: every step before spawn. */
-async function prepareRun(ctx: AdapterExecutionContext, startedAtMs: number): Promise<PreparedRun> {
+async function prepareRun(ctx: AdapterExecutionContext, startedAtMs: number, native: PrimeNativeConfig): Promise<PreparedRun> {
   const target = readAdapterExecutionTarget({ executionTarget: ctx.executionTarget, legacyRemoteExecution: ctx.executionTransport?.remoteExecution });
   if (adapterExecutionTargetIsRemote(target)) {
     throw new Error(`prime_agent_local runs only on the local Paperclip host in phase 1; refusing ${describeAdapterExecutionTarget(target)}.`);
   }
   throwIfAborted(ctx);
   const configured = resolvePrimeRuntimeConfig(ctx.config, ctx.agent, resolvePaperclipInstanceRootForAdapter());
+  const policy = resolvePrimeModelPolicy(ctx.config, configured, native);
   const { cwd, env: paperclipEnv } = await buildPaperclipRunEnv(ctx, configured);
   const { env: childEnv } = buildPrimeChildEnv(process.env, configured.agentDir, paperclipEnv);
   const runtime = { ...configured, command: await resolvePrimeCommand(configured.command, childEnv) };
@@ -110,7 +117,7 @@ async function prepareRun(ctx: AdapterExecutionContext, startedAtMs: number): Pr
   throwIfAborted(ctx);
   const skills = await stagePrimeSkills(ctx.config);
   const deadlineMs = runtime.timeoutSec > 0 ? startedAtMs + runtime.timeoutSec * 1000 : null;
-  return { runtime, cwd, paperclipEnv, childEnv, seeded, skills, deadlineMs };
+  return { runtime, cwd, paperclipEnv, childEnv, seeded, skills, deadlineMs, policy };
 }
 /** pi-local execute.ts 574-635 (system prompt part). */
 async function buildSystemPrompt(ctx: AdapterExecutionContext, runtime: PrimeRuntimeConfig, cwd: string): Promise<SystemPrompt> {
@@ -235,10 +242,12 @@ function mapResult(attempt: Attempt, prep: PreparedRun, clearSession: boolean): 
   const session = sessionParams ? { sessionId, sessionParams: { ...sessionParams }, sessionDisplayId: sessionId } : {};
   return { ...base, exitCode: 0, errorCode: null, errorMessage: null, ...session, summary: parsed.finalMessage };
 }
-async function runPrime(ctx: AdapterExecutionContext, prep: PreparedRun, native: PrimeNativeConfig): Promise<AdapterExecutionResult> {
+async function runPrime(
+  ctx: AdapterExecutionContext, prep: PreparedRun, native: PrimeNativeConfig, settingsNotes: string[], sources: PrimeAuditSources,
+): Promise<AdapterExecutionResult> {
   const { runtime, cwd } = prep;
   const system = await buildSystemPrompt(ctx, runtime, cwd);
-  const notes = [...prep.seeded.notes, ...system.notes];
+  const notes = [...prep.seeded.notes, ...settingsNotes, ...system.notes];
   const saved = primeSessionCodec.deserialize(ctx.runtime.sessionParams) as PrimeSessionParams | null;
   const header = saved ? await readPrimeSessionHeader(saved.sessionFile) : null;
   const decision = decidePrimeResume({
@@ -253,15 +262,22 @@ async function runPrime(ctx: AdapterExecutionContext, prep: PreparedRun, native:
     );
   }
   const resumeSessionFile = decision.resume ? decision.sessionFile : null;
-  if (native.runtime === "daemon") return await executeDaemon({ ctx, prep, native, system, notes, resumeSessionFile,
+  if (native.runtime === "daemon") return await executeDaemon({ ctx, prep, native, system, notes, resumeSessionFile, sources,
     userPrompt: (resumed) => buildUserPrompt(ctx, runtime, system.ownsDefaultPolicy, resumed) });
+  const audited = (attempt: Attempt) => {
+    const { sessionId, usage } = attempt.parsed;
+    // Print stdout is the complete event stream up to exit, so no assistant usage there means no tokens.
+    if (sessionId) notePrimeParent(sources, { sessionId, sessionFile: path.join(runtime.agentDir.sessionDir, `${sessionId}.jsonl`),
+      tokens: usage?.totalTokens ?? 0, prompted: true });
+    return attempt;
+  };
   const first = await runAttempt(ctx, prep, system, notes, resumeSessionFile);
   const firstFailed = !first.proc.timedOut && (first.proc.exitCode !== 0 || first.parsed.errors.length > 0);
   if (saved && resumeSessionFile !== null && firstFailed && isPrimeUnknownSessionError(first.proc.stdout, first.proc.stderr)) {
     await ctx.onLog("stdout", `[paperclip] Prime session "${saved.sessionId}" is unavailable; retrying with a fresh session.\n`);
-    return mapResult(await runAttempt(ctx, prep, system, notes, null), prep, true);
+    return mapResult(audited(await runAttempt(ctx, prep, system, notes, null)), prep, true);
   }
-  return mapResult(first, prep, false);
+  return mapResult(audited(first), prep, false);
 }
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
   const startedAtMs = Date.now();
@@ -269,17 +285,30 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   let native: PrimeNativeConfig;
   try {
     native = resolvePrimeNativeConfig(ctx.config);
-    prep = await prepareRun(ctx, startedAtMs);
+    prep = await prepareRun(ctx, startedAtMs, native);
   } catch (err) {
     return preflightFailure(err);
   }
+  const settingsNotes: string[] = [];
+  let settings;
+  try {
+    settings = await preparePrimeSettings(prep.runtime.agentDir.agentDir, prep.policy, settingsNotes); // §9 items 1-2, before Prime starts
+  } catch (err) {
+    await prep.skills.cleanup();
+    return preflightFailure(err);
+  }
+  const sources = await startPrimeAudit(prep.runtime.agentDir.sessionDir);
+  let result: AdapterExecutionResult;
   try {
     await ctx.onCancellationReady?.(); // A18: the host registers the execution control here
-    return await runPrime(ctx, prep, native);
+    result = await runPrime(ctx, prep, native, settingsNotes, sources);
   } catch (err) {
-    if (err instanceof RunCancelledError) return cancelledResult(err.message);
-    throw err;
+    if (err instanceof RunCancelledError) result = cancelledResult(err.message);
+    else if (prep.policy.allowedModels === null) throw err;
+    else result = { exitCode: 1, signal: null, timedOut: false, errorCode: "prime_run_failed", errorMessage: err instanceof Error ? err.message : String(err), clearSession: false };
   } finally {
     await prep.skills.cleanup();
   }
+  // §9 items 3-5 run on every outcome: success, failure, cancel, timeout and uncertain.
+  return await finishPrimeRun(result, { policy: prep.policy, settings, credential: prep.runtime.credential, agentDir: prep.runtime.agentDir.agentDir, sources });
 }

@@ -105,11 +105,17 @@ export function resetPrimeModelsCacheForTests(): void {
 
 let hostModelsCache: { expiresAt: number; models: AdapterModel[] } | null = null;
 
+/** TAI-225 §9 item 8: the picker never links the host login. A placeholder Anthropic key makes `model list` show the
+ * catalog's Anthropic rows. `model list` calls no model, and no run uses this dir. */
+const PICKER_PROVIDER = "anthropic";
+const PICKER_KEY_ENV_VAR = "PAPERCLIP_PRIME_MODEL_LIST_PLACEHOLDER";
+const PICKER_PLACEHOLDER_KEY = "paperclip-model-list-placeholder";
+
 async function loadHostModels(): Promise<AdapterModel[]> {
   let ephemeral: EphemeralPrimeAgentDir | null = null;
   try {
-    ephemeral = await createEphemeralPrimeAgentDir({ mode: "host_auth", hostAuthFile: path.join(os.homedir(), ".prime", "agent", "auth.json") });
-    await seedPrimeAgentDir(ephemeral.plan, { provider: "", env: {} });
+    ephemeral = await createEphemeralPrimeAgentDir({ mode: "api_key", provider: PICKER_PROVIDER, apiKeyEnvVar: PICKER_KEY_ENV_VAR });
+    await seedPrimeAgentDir(ephemeral.plan, { provider: PICKER_PROVIDER, env: { [PICKER_KEY_ENV_VAR]: PICKER_PLACEHOLDER_KEY } });
     const { env } = buildPrimeChildEnv(process.env, ephemeral.plan, {});
     const command = await resolvePrimeDefaultCommand(process.env);
     const models = await discoverPrimeModels({ command, env, cwd: ephemeral.plan.agentDir });
@@ -122,7 +128,7 @@ async function loadHostModels(): Promise<AdapterModel[]> {
   }
 }
 
-/** ServerAdapterModule.listModels: host-credential ephemeral agent dir; [] on any failure. */
+/** ServerAdapterModule.listModels: Anthropic catalog rows from a placeholder-key ephemeral agent dir; [] on any failure. */
 export async function listPrimeModelsForAdapter(): Promise<AdapterModel[]> {
   if (hostModelsCache && hostModelsCache.expiresAt > Date.now()) return hostModelsCache.models;
   return loadHostModels();

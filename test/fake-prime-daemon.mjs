@@ -71,7 +71,13 @@ function emit(s, event) {
   const wire = env.FAKE_DAEMON_ENVELOPE_EVENTS === "1" ? { type: "event", id: `${s.id}:${s.seq}`, protocol: { name: "prime-agent.daemon", version: 7 }, event: message } : message;
   for (const c of s.clients) send(c, wire);
 }
-function create(command) {
+// TAI-225 §9 audit: Prime appends {"type":"message","message":{role,provider,model,...}} lines to the session file.
+const appendTurn = (s, message) => appendFileSync(s.sessionFile, `${JSON.stringify({ type: "message", id: `m${s.seq}`, message })}\n`);
+const mergeJson = (file, patch) => {
+  const current = existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : {};
+  writeFileSync(file, `${JSON.stringify({ ...current, ...patch })}\n`);
+};
+function create(command, depth = 0) {
   const config = command.config ?? {};
   const sessionPath = command.sessionPath;
   for (const s of sessions.values()) if (sessionPath && s.sessionFile === sessionPath) return s;
@@ -80,7 +86,7 @@ function create(command) {
   const sessionFile = sessionPath ?? path.join(config.sessionDir, `${sessionId}.jsonl`);
   if (!existsSync(sessionFile)) {
     mkdirSync(path.dirname(sessionFile), { recursive: true });
-    writeFileSync(sessionFile, `${JSON.stringify({ type: "session", version: 3, id: sessionId, cwd: config.cwd, rlmDepth: 0 })}\n`);
+    writeFileSync(sessionFile, `${JSON.stringify({ type: "session", version: 3, id: sessionId, cwd: config.cwd, rlmDepth: depth })}\n`);
   }
   const initial = JSON.parse(env.FAKE_DAEMON_INITIAL_STATS ?? '{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0,"cost":0}');
   const s = { id: `a${process.pid.toString(16)}${++nextSession}`.slice(0, 12), sessionId, sessionFile, cwd: config.cwd, config,
@@ -92,6 +98,10 @@ function create(command) {
 }
 function finishPrompt(s, events) {
   for (const e of events) emit(s, e);
+  for (const e of events) {
+    if (e.type === "message_end" && e.message?.role === "assistant") appendTurn(s, { ...e.message, provider: s.provider, model: s.model });
+  }
+  if (env.FAKE_DAEMON_PARENT_FILE_GONE === "1" && s.depth === undefined) rmSync(s.sessionFile, { force: true });
   const u = usageOf(events);
   for (const k of Object.keys(s.stats)) s.stats[k] += u[k];
   s.last = lastText(events) ?? s.last;
@@ -137,6 +147,18 @@ async function handle(socket, id, command) {
       s.prompted = true;
       const mode = env.FAKE_DAEMON_PROMPT_MODE ?? "ok";
       if (mode === "busy") return fail(PROCESSING);
+      if (env.FAKE_DAEMON_EDIT_SETTINGS) mergeJson(path.join(s.config.agentDir, "settings.json"), JSON.parse(env.FAKE_DAEMON_EDIT_SETTINGS));
+      if (env.FAKE_DAEMON_EDIT_AUTH) mergeJson(path.join(s.config.agentDir, "auth.json"), JSON.parse(env.FAKE_DAEMON_EDIT_AUTH));
+      if (env.FAKE_DAEMON_AUDIT_CHILD) {
+        // A finished depth-1 child whose turns come from FAKE_DAEMON_AUDIT_CHILD (a JSON list of assistant messages).
+        // Its update carries no sessionFile; the adapter finds the file through get_session_stats and list.
+        const child = create({ config: s.config }, 1);
+        child.depth = 1;
+        child.stats = { input: 10, output: 20, cacheRead: 0, cacheWrite: 0, total: 30, cost: 0 };
+        for (const message of JSON.parse(env.FAKE_DAEMON_AUDIT_CHILD)) appendTurn(child, message);
+        if (env.FAKE_DAEMON_AUDIT_CHILD_NO_FILE === "1") rmSync(child.sessionFile, { force: true });
+        emit(s, { type: "rlm_child_update", child: { activeSessionId: child.id, status: "done" } });
+      }
       if (mode === "error") {
         const error = env.FAKE_DAEMON_PROMPT_ERROR ?? "No API key found for anthropic.";
         for (const e of [{ type: "agent_start" }, { type: "turn_start" }, { type: "turn_end", error }, { type: "agent_end" }]) emit(s, e);

@@ -33,8 +33,12 @@ Core fields:
 - extraArgs (string[], optional): extra prime-agent arguments
 
 Credentials:
-- credentialMode "host_auth" (default): the host ~/.prime/agent/auth.json is symlinked into the agent's own Prime dir
-- credentialMode "api_key": set apiKeyEnvVar to the env var (bound to a Paperclip secret) that holds the provider key
+- credentialMode "host_auth" (default): the host ~/.prime/agent/auth.json is symlinked into the agent's own Prime dir. Unsafe with Prime 0.10: a token refresh replaces the link and splits the login
+- credentialMode "api_key": set apiKeyEnvVar to the env var (bound to a Paperclip secret) that holds the provider key. A Claude sk-ant-oat subscription token is billed as subscription. The variable is removed from Prime's own environment
+
+Model allowlist:
+- allowedModels (string[] of provider/modelId, optional): the adapter writes Prime's allowlist and model roles before every run, checks settings.json and auth.json after it, and audits each actor's model from Prime's session files (resultJson.modelAudit). Any breach fails the run
+- modelRoles (object, optional, needs allowedModels): subagentDefaultModel, auxiliaryModel, providerBackupModel, imageModel → provider/modelId. Default: model
 
 Operational fields:
 - timeoutSec (number, optional): run timeout in seconds (0 = none)

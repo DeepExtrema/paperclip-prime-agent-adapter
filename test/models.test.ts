@@ -195,10 +195,11 @@ describe("adapter model listing (INTERFACES §8)", () => {
     vi.mocked(buildPrimeChildEnv).mockImplementation((_base, plan) => ({ env: { PATH: `${dir}:/usr/bin:/bin`, PRIME_AGENT_CODING_AGENT_DIR: plan.agentDir }, droppedKeys: [] }));
   });
   afterEach(() => models.resetPrimeModelsCacheForTests());
-  it("lists the host credential's models through a seeded ephemeral dir and cleans it up", async () => {
+  it("lists models through a placeholder-key ephemeral dir, never the host login (TAI-225 §9 item 8), and cleans it up", async () => {
     expect(await models.listPrimeModelsForAdapter()).toHaveLength(275);
-    expect(createEphemeralPrimeAgentDir).toHaveBeenCalledWith({ mode: "host_auth", hostAuthFile: path.join(home, ".prime", "agent", "auth.json") });
-    expect(seedPrimeAgentDir).toHaveBeenCalledWith(plans[0], { provider: "", env: {} });
+    const credential = { mode: "api_key", provider: "anthropic", apiKeyEnvVar: "PAPERCLIP_PRIME_MODEL_LIST_PLACEHOLDER" };
+    expect(createEphemeralPrimeAgentDir).toHaveBeenCalledWith(credential);
+    expect(seedPrimeAgentDir).toHaveBeenCalledWith(plans[0], { provider: "anthropic", env: { PAPERCLIP_PRIME_MODEL_LIST_PLACEHOLDER: "paperclip-model-list-placeholder" } });
     expect(buildPrimeChildEnv).toHaveBeenCalledWith(process.env, plans[0], {});
     expect(runChildProcess).toHaveBeenCalledWith(expect.any(String), "prime-agent", ["model", "list"], expect.objectContaining({ cwd: plans[0]?.agentDir }));
     expect(cleanups).toBe(1);

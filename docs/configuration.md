@@ -23,12 +23,32 @@ All fields live in the agent's `adapterConfig`.
 | `apiKeyEnvVar` | env var name | required when `api_key` | `credential.apiKeyEnvVar` |
 | `hostAuthFile` | absolute path | `<os.homedir()>/.prime/agent/auth.json` | `credential.hostAuthFile` |
 | `agentDirRoot` | absolute path | `<instanceRoot>/companies/<companyId>/agents` | §3 layout root |
+| `allowedModels` | `provider/modelId` list (or one per line) | unset | [model allowlist](#model-allowlist) |
+| `modelRoles` | object, role → `provider/modelId` | every role = `model` | [model allowlist](#model-allowlist); needs `allowedModels` |
 
 Empty strings count as unset. The Paperclip UI writes the thinking level as `thinkingEffort` (create form) or `effort` (edit form). Precedence: `thinking`, then `effort`, then `thinkingEffort` (INTERFACES §16 A21). The first key that is present wins, and an empty value means Prime's own default (no `--thinking`).
 
 ## Model
 
 The required `model` is `provider/modelId`, split at the first `/`. For example, `vercel-ai-gateway/openai/gpt-6.1-sol` means provider `vercel-ai-gateway` and model `openai/gpt-6.1-sol`. It must be listed by `prime-agent model list` for the agent's credential or the run is refused before spawn (`prime_model_unknown`). Listed is not proof of entitlement. There is no fallback to another model or provider. `--provider` and `--model` are always passed.
+
+## Model allowlist
+
+`allowedModels` makes the adapter own Prime's model allowlist. Unset, nothing below applies except the `settings.json` read check, and the model audit only reports.
+
+Before every run, daemon and print:
+
+1. The adapter reads `<agentDir>/settings.json`. Missing means `{}`. If it exists but is not a JSON object, the run fails with `prime_settings_invalid` and the file is not written (with or without `allowedModels`).
+2. It refuses the config with `prime_allowed_models_invalid` if `model`, `subagentDefaultModel` or a role is not in `allowedModels`, or the list is empty.
+3. It writes the managed keys and keeps every other key: `allowedModels`; `enabledModels` (= `allowedModels`); `defaultProvider` and `defaultModel` (from `model`); and the four model roles of Prime 0.10.1, `subagentDefaultModel`, `auxiliaryModel`, `providerBackupModel` and `imageModel`. A role is `modelRoles.<role>`, else `subagentDefaultModel` for that role, else `model`. A managed key changed since the last run is put back, and the run notes name it. `resultJson.settings.sha256Written` records the file after the write.
+
+After every run, whatever the outcome (success, failure, cancel, timeout, uncertain):
+
+- **Settings:** a managed key that differs from what was written fails the run with `prime_settings_tampered`. `resultJson.settings` has `sha256After` and `tamperedKeys`.
+- **Auth (`api_key`):** `auth.json` must be a regular 0600 file whose only key is the configured provider, else `prime_auth_tampered`. See [credentials](credentials.md#api_key).
+- **Model audit:** the adapter reads Prime's own session files: the parent session, every child the daemon reported (`rlm_child_update`, `list` rows with `rlmDepth > 0`, `get_session_stats`), and every `*.jsonl` under `<agentDir>/sessions/` that changed during the run. Only the lines added during this run are read. Each assistant turn's `provider/model` goes into `resultJson.modelAudit = { ok, enforced, actors: [{ sessionId, activeSessionId, depth, file, models, turns, turnsWithoutModel, tokens }], forbidden, unreadable, absent }`. The run fails with `prime_model_audit_failed` when a turn's model is outside `allowedModels`, a reported child or the parent has no readable session file (a missing file passes, listed in `absent`, only when no prompt was sent or the daemon's stats show 0 tokens for it), a turn has no `provider` or `model`, an actor's file has no turns while the daemon's stats show tokens for it, or a line is not JSON. The usage row keeps `model` only when the audit is `ok`; otherwise it shows the forbidden model, or `unverified`.
+
+A policy failure replaces the run's own code, which moves to `errorMeta.runErrorCode`, and the session is not saved. `recentModels` is Prime's own history and is not managed. Nested settings objects (`compaction`, `branchSummary`, `autoRefine`, `retry`) are not known to hold a model in 0.10.1 (`unverified`); if one does, the audit still catches the turn after the run, but nothing blocks it during the run. Prime's project-level settings file in the working directory is not read or checked by the adapter.
 
 ## Thinking and timeouts
 

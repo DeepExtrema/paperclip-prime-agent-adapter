@@ -12,6 +12,7 @@ import type { PrimeAgentDirPlan, PrimeCredentialConfig, PrimeRuntimeConfig } fro
 const mocks = vi.hoisted(() => ({
   resolvePrimeRuntimeConfig: vi.fn(), seedPrimeAgentDir: vi.fn(), createEphemeralPrimeAgentDir: vi.fn(), buildPrimeChildEnv: vi.fn(),
   assertPrimeCwdAllowed: vi.fn(), listPrimeModels: vi.fn(), assertPrimeModelListed: vi.fn(), resolvePrimeCommand: vi.fn(),
+  inspectHostAuth: vi.fn(),
 }));
 vi.mock("../src/server/runtime-config.js", () => ({ ...mocks }));
 vi.mock("../src/server/models.js", () => ({ ...mocks }));
@@ -79,6 +80,7 @@ beforeEach(async () => {
   mocks.seedPrimeAgentDir
     .mockReset()
     .mockImplementation(async (plan: PrimeAgentDirPlan) => ({ plan, auth: "host_auth_symlink", billingType: "subscription", notes: [] }));
+  mocks.inspectHostAuth.mockReset().mockResolvedValue("subscription");
   const ids = ["anthropic/claude-haiku-4-5", "anthropic/claude-opus-5-5"];
   mocks.listPrimeModels.mockReset().mockResolvedValue(ids.map((id) => ({ id, label: id })));
   mocks.assertPrimeModelListed.mockReset().mockImplementation((modelRef: string, models: Array<{ id: string }>) => {
@@ -255,12 +257,15 @@ describe("testEnvironment: version (INTERFACES.md §8, §10)", () => {
 });
 
 describe("testEnvironment: credential (INTERFACES.md §3, §10)", () => {
-  it("seeds the ephemeral dir with the configured credential and reports host auth", async () => {
+  it("checks the host login in place, never links it into the ephemeral dir, and skips model listing (TAI-225 §9 item 8)", async () => {
     const result = await testEnvironment(ctx());
-    const plan = expect.objectContaining({ kind: "ephemeral", agentDir: ephemeralDirs[0] });
-    expect(mocks.seedPrimeAgentDir).toHaveBeenCalledWith(plan, { provider: "anthropic", env: {} });
+    expect(mocks.inspectHostAuth).toHaveBeenCalledWith(path.join(root, "host-auth.json"), "anthropic");
+    expect(mocks.seedPrimeAgentDir).not.toHaveBeenCalled();
     const message = "Host Prime auth file is present and safe (billing: subscription).";
     expect(check(result, "prime_auth_host_linked")).toEqual({ code: "prime_auth_host_linked", level: "info", message });
+    expect(check(result, "prime_models_skipped")).toMatchObject({ level: "info" });
+    expect(mocks.listPrimeModels).not.toHaveBeenCalled();
+    expect(result.status).toBe("pass");
   });
 
   it("reports an api_key credential without showing the key", async () => {
@@ -281,6 +286,7 @@ describe("testEnvironment: credential (INTERFACES.md §3, §10)", () => {
     ["prime_agent_dir_unsafe", "prime_auth_unsafe"],
   ] as const)("maps PrimeCredentialError %s to check %s", async (errorCode, checkCode) => {
     mocks.seedPrimeAgentDir.mockRejectedValue(new PrimeCredentialError(errorCode, `credential problem: ${errorCode}`));
+    mocks.inspectHostAuth.mockRejectedValue(new PrimeCredentialError(errorCode, `credential problem: ${errorCode}`));
     const result = await testEnvironment(ctx());
     expect(result.status).toBe("fail");
     expect(check(result, checkCode)).toEqual({ code: checkCode, level: "error", message: `credential problem: ${errorCode}` });
@@ -294,7 +300,14 @@ describe("testEnvironment: credential (INTERFACES.md §3, §10)", () => {
   });
 });
 
+const API_KEY_CREDENTIAL = { mode: "api_key", provider: "anthropic", apiKeyEnvVar: "ANTHROPIC_API_KEY" } as const;
+const useApiKeyRuntime = () => beforeEach(() => {
+  mocks.resolvePrimeRuntimeConfig.mockImplementation(() => runtime({ credential: API_KEY_CREDENTIAL, env: { ANTHROPIC_API_KEY: "sk-wp5-key" } }));
+  mocks.seedPrimeAgentDir.mockImplementation(async (plan: PrimeAgentDirPlan) => ({ plan, auth: "api_key_file", billingType: "api", notes: [] }));
+});
+
 describe("testEnvironment: model list (INTERFACES.md §8, §10)", () => {
+  useApiKeyRuntime();
   it("lists models in the seeded ephemeral dir", async () => {
     const result = await testEnvironment(ctx());
     const env = expect.objectContaining({ PRIME_AGENT_CODING_AGENT_DIR: ephemeralDirs[0] });
@@ -329,18 +342,19 @@ describe("testEnvironment: model list (INTERFACES.md §8, §10)", () => {
     await writeFakePrime("0.11.0");
     await testEnvironment(ctx());
     await writeFakePrime("0.10.0");
-    mocks.seedPrimeAgentDir.mockRejectedValue(new PrimeCredentialError("prime_host_auth_missing", "no host auth"));
+    mocks.seedPrimeAgentDir.mockRejectedValue(new PrimeCredentialError("prime_api_key_missing", "no key"));
     await testEnvironment(ctx());
     expect(mocks.listPrimeModels).not.toHaveBeenCalled();
   });
 });
 
 describe("testEnvironment: configured model (INTERFACES.md §8, §10, §16 A9)", () => {
+  useApiKeyRuntime();
   it("passes with every check in order when the configured model is listed", async () => {
     const result = await testEnvironment(ctx());
     expect(result.status).toBe("pass");
     expect(codes(result)).toEqual([
-      "prime_cwd_valid", "prime_cli_found", "prime_cli_version", "prime_auth_host_linked", "prime_models_discovered", "prime_model_listed",
+      "prime_cwd_valid", "prime_cli_found", "prime_cli_version", "prime_auth_api_key", "prime_models_discovered", "prime_model_listed",
     ]);
     const models = [expect.objectContaining({ id: MODEL_REF }), expect.objectContaining({ id: "anthropic/claude-opus-5-5" })];
     expect(mocks.assertPrimeModelListed).toHaveBeenCalledWith(MODEL_REF, models);

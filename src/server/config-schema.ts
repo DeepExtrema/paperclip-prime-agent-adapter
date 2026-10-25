@@ -10,7 +10,7 @@ export function getPrimeConfigSchema(): AdapterConfigSchema {
           { value: "host_auth", label: "Host Prime login (auth.json symlink)" },
           { value: "api_key", label: "API key from an environment variable" },
         ],
-        hint: "host_auth links the host ~/.prime/agent/auth.json into this agent's own Prime dir." },
+        hint: "host_auth links the host ~/.prime/agent/auth.json into this agent's own Prime dir. Unsafe with Prime 0.10: a token refresh splits the login. Prefer api_key." },
       { key: "apiKeyEnvVar", label: "API key environment variable", type: "text",
         hint: "Name of the env var (bind it to a Paperclip secret) that holds the provider key. Never the key itself.",
         meta: { visibleWhen: { key: "credentialMode", values: ["api_key"] } } },
@@ -36,6 +36,8 @@ export function getPrimeConfigSchema(): AdapterConfigSchema {
       { key: "autonomousGateTimeoutMs", label: "Gate timeout (ms)", type: "text" },
       { key: "rlmMaxDepth", label: "Subagent max depth", type: "text", hint: "rlm.spawn depth limit for this agent's sessions." },
       { key: "subagentDefaultModel", label: "Subagent default model", type: "text", hint: "provider/modelId used when rlm.spawn pins no model." },
+      { key: "allowedModels", label: "Allowed models", type: "textarea",
+        hint: "One provider/modelId per line. When set, the adapter writes Prime's allowlist and model roles before every run, checks settings.json and auth.json after it, and fails the run if any actor used another model. modelRoles is set through the API." },
     ],
   };
 }

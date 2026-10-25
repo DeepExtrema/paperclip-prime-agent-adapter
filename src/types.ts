@@ -109,7 +109,7 @@ export interface SeededPrimeAgentDir {
   plan: PrimeAgentDirPlan;
   /** How auth.json was provisioned in this dir. */
   auth: "host_auth_symlink" | "api_key_file";
-  /** "subscription" only for a host OAuth credential; "api" for an API key; "unknown" otherwise. */
+  /** "subscription" for a host OAuth credential or an `sk-ant-oat` subscription token; "api" for other API keys; "unknown" otherwise. */
   billingType: Extract<AdapterBillingType, "subscription" | "api" | "unknown">;
   /** Human-readable notes for onMeta commandNotes. Never contain secrets. */
   notes: string[];
@@ -372,6 +372,8 @@ export const PRIME_CHECK_CODES = [
   "prime_models_discovered",
   "prime_models_empty",
   "prime_models_discovery_failed",
+  /** host_auth: the host login is never linked into a temp dir (TAI-225 §9 item 8), so the environment test lists no models. */
+  "prime_models_skipped",
   "prime_model_listed",
   "prime_model_unknown",
 ] as const;
@@ -392,5 +394,11 @@ export const PRIME_RESULT_ERROR_CODES = [
   "prime_run_timeout",
   /** Cancelled via ctx.signal before or during the run. */
   "prime_run_cancelled",
+  /** TAI-225 §9 policy codes (PrimePolicyErrorCode in errors.ts). After a run they replace the run's own code, which moves to errorMeta.runErrorCode. */
+  "prime_settings_invalid",
+  "prime_allowed_models_invalid",
+  "prime_settings_tampered",
+  "prime_auth_tampered",
+  "prime_model_audit_failed",
 ] as const;
 export type PrimeResultErrorCode = (typeof PRIME_RESULT_ERROR_CODES)[number];

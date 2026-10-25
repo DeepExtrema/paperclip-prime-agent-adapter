@@ -105,7 +105,7 @@ describe("execute: fresh run (INTERFACES §11.3, §11.5, §11.7)", () => {
       exitCode: 0, signal: null, timedOut: false, errorCode: null, errorMessage: null,
       provider: "anthropic", model: "anthropic/claude-haiku-4-5", biller: "anthropic", billingType: "subscription",
       usage: { inputTokens: 3, outputTokens: 4, cachedInputTokens: 0 }, usageBasis: "per_run", costUsd: null,
-      resultJson: { stdout: readFileSync(RUN2, "utf8"), stderr: "", cacheWriteTokens: 10553, totalTokens: 10560 },
+      resultJson: { stdout: readFileSync(RUN2, "utf8"), stderr: "", cacheWriteTokens: 10553, totalTokens: 10560, modelAudit: expect.objectContaining({ enforced: false }) },
       sessionId: SESSION2, sessionDisplayId: SESSION2, summary: "OK", clearSession: false,
       sessionParams: { sessionId: SESSION2, sessionFile: path.join(sessionDir(), `${SESSION2}.jsonl`), cwd: ws(), provider: "anthropic", model: "claude-haiku-4-5", agentDir: agentDir() },
     });

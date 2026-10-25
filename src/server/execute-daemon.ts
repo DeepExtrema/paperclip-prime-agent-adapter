@@ -1,6 +1,6 @@
 import type {AdapterExecutionContext, AdapterExecutionResult} from "@paperclipai/adapter-utils";
 import {spawn} from "node:child_process";
-import {randomBytes, randomUUID} from "node:crypto";
+import {randomBytes} from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import net from "node:net";
@@ -8,6 +8,7 @@ import net from "node:net";
 import {type ParsedPrimeOutput, PRIME_ADAPTER_TYPE, type PrimeSessionParams} from "../types.js";
 
 import { emitPrimeMeta, type PreparedRun, type SystemPrompt } from "./execute.js";
+import { notePrimeChild, notePrimeParent, type PrimeAuditSources } from "./model-policy.js";
 import {parsePrimeJsonl} from "./parse.js";
 
 export type PrimeDaemonErrorCode =|"prime_daemon_start_failed"|"prime_daemon_socket_unsafe"|
@@ -264,20 +265,6 @@ export function resolvePrimeNativeConfig(config: Record<string, unknown>): Prime
     subagentDefaultModel,
   };
 }
-async function writePrivateJson(file: string, value: unknown): Promise<void> {
-  const temp = `${file}.${process.pid}.${randomUUID()}.tmp`;
-  await fs.writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, {flag : "wx", mode : 0o600});
-  await fs.rename(temp, file);
-}
-async function readJsonObject(file: string): Promise<Record<string, unknown>|null> {
-  try {
-    const value: unknown = JSON.parse(await fs.readFile(file, "utf8"));
-    return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>)
-                                                                                : null;
-  } catch {
-    return null;
-  }
-}
 export function primeDaemonSocketPlan(childEnv: Record<string, string | undefined>, userId = process.getuid?.() ?? 0) {
   const env =
     Object.fromEntries(Object.entries(childEnv).filter((entry): entry is[string, string] => entry[1] !== undefined));
@@ -298,7 +285,15 @@ type RunDaemon = {
   pid: number; socketPath: string; stderrTail: string; client: PrimeDaemonClient;
   workers: Set<number>; stopDaemon: () => Promise<void>;
 };
-export async function startDaemon(ctx: AdapterExecutionContext, prep: PreparedRun): Promise<RunDaemon> {
+/** Daemon roster rows below the parent are children; their session files feed the model audit. */
+function noteRosterChildren(sources: PrimeAuditSources | undefined, rows: unknown[]) {
+  for (const row of rows) {
+    if (!sources || !isObject(row) || typeof row.rlmDepth !== "number" || row.rlmDepth <= 0) continue;
+    const id = str(row.activeSessionId);
+    if (id) notePrimeChild(sources, id, { sessionFile: str(row.sessionFile), depth: row.rlmDepth });
+  }
+}
+export async function startDaemon(ctx: AdapterExecutionContext, prep: PreparedRun, sources?: PrimeAuditSources): Promise<RunDaemon> {
   const { env, socketPath } = primeDaemonSocketPlan(prep.childEnv);
   await fs.mkdir(path.dirname(socketPath), { recursive: true, mode: 0o700 });
   if (env.TMPDIR && env.TMPDIR !== prep.childEnv.TMPDIR) {
@@ -332,6 +327,7 @@ export async function startDaemon(ctx: AdapterExecutionContext, prep: PreparedRu
           for (const row of roster.data.sessions) {
             if (isObject(row) && typeof row.workerPid === "number") workers.add(row.workerPid);
           }
+          noteRosterChildren(sources, roster.data.sessions);
         }
         await shutdownClient?.request({ type: "shutdown" }, 1000).catch(() => undefined);
         shutdownClient?.close();
@@ -442,6 +438,7 @@ async function runAttempt(
   daemon: RunDaemon,
   resumeSessionFile: string | null,
   userPrompt: (resumed: boolean) => string,
+  sources: PrimeAuditSources,
   ): Promise<Outcome> {
   const {runtime, cwd} = prep;
   let stdout = "";
@@ -497,6 +494,8 @@ async function runAttempt(
         const childId = str(message.event.child.activeSessionId);
         if (childId) {
           childIds.add(childId);
+          const depth = message.event.child.rlmDepth;
+          notePrimeChild(sources, childId, { sessionFile: str(message.event.child.sessionFile), depth: typeof depth === "number" ? depth : null });
           const previous = childStatus.get(childId);
           const status = str(message.event.child.status) ?? "running";
           childStatus.set(childId, { status, snapshotAfter: previous?.status === status
@@ -524,6 +523,7 @@ async function runAttempt(
       return await outcome("create_failed",
                            created.error ?? `Unexpected create response: ${JSON.stringify(created).slice(0, 300)}`);
     if (isObject(created.data) && typeof created.data.workerPid === "number") daemon.workers.add(created.data.workerPid);
+    notePrimeParent(sources, { sessionId: session.sessionId, sessionFile: session.sessionFile });
     const sid = session.activeSessionId;
     selectedId = sid;
     const must = async (command: Record<string, unknown>&{type : string}) => {
@@ -551,6 +551,7 @@ async function runAttempt(
     stop = watchStop(ctx, prep, client, sid);
     if (stopReason()) return await outcome(stopReason()!, null);
     prompted = true;
+    notePrimeParent(sources, { prompted: true });
     const promptResponse = await client.request(
       {type : "prompt_and_wait", activeSessionId : sid, message : prompt, queueIfBusy : false}, null);
     if (stopReason()) return await outcome(stopReason()!, null);
@@ -574,6 +575,7 @@ async function runAttempt(
                      : null;
       if (!rows) return await outcome("prompt_failed", listed.error ?? "Unexpected daemon list response.");
       for (const row of rows) if (typeof row.workerPid === "number") daemon.workers.add(row.workerPid);
+      noteRosterChildren(sources, rows);
       for (const row of rows) {
         if (typeof row.rlmDepth === "number" && row.rlmDepth > 0) {
           const id = str(row.activeSessionId);
@@ -601,9 +603,12 @@ async function runAttempt(
     const last = await client.request({type : "get_last_assistant_text", activeSessionId : sid}, 30_000);
     const after = readStats(await client.request({type : "get_session_stats", activeSessionId : sid}, 30_000));
     const statsDelta = delta(before, after);
+    if (statsDelta) notePrimeParent(sources, { tokens: statsDelta.total });
     for (const childId of childIds) {
-      const childStats = readStats(
-        await client.request({type : "get_session_stats", activeSessionId : childId}, 30_000).catch(() => null));
+      const childResponse = await client.request({type : "get_session_stats", activeSessionId : childId}, 30_000).catch(() => null);
+      const childStats = readStats(childResponse);
+      notePrimeChild(sources, childId, { tokens: childStats?.total ?? null,
+        sessionFile: childResponse?.success && isObject(childResponse.data) ? str(childResponse.data.sessionFile) : null });
       if (statsDelta && childStats) {
         for (const key of Object.keys(statsDelta) as (keyof StatsDelta)[])
           statsDelta[key] += childStats[key];
@@ -668,21 +673,14 @@ export async function executeDaemon(input: {
   notes : string[];
   resumeSessionFile : string | null;
   userPrompt : (resumed: boolean) => string;
+  sources : PrimeAuditSources;
 }): Promise<AdapterExecutionResult> {
-  const {ctx, prep, native, system, notes, resumeSessionFile, userPrompt} = input;
-  if (native.subagentDefaultModel !== null) {
-    const settingsFile = path.join(prep.runtime.agentDir.agentDir, "settings.json");
-    const settings = (await readJsonObject(settingsFile)) ?? {};
-    if (settings.subagentDefaultModel !== native.subagentDefaultModel) {
-      await writePrivateJson(settingsFile, {...settings, subagentDefaultModel : native.subagentDefaultModel});
-    }
-    notes.push(`settings.json subagentDefaultModel = ${native.subagentDefaultModel}.`);
-  }
+  const {ctx, prep, native, system, notes, resumeSessionFile, userPrompt, sources} = input;
   if (prep.runtime.extraArgs.length > 0)
     await ctx.onLog("stdout", '[paperclip] extraArgs are ignored with runtime "daemon".\n');
   let daemon: RunDaemon;
   try {
-    daemon = await startDaemon(ctx, prep);
+    daemon = await startDaemon(ctx, prep, sources);
   } catch (err) {
     if (!(err instanceof PrimeDaemonError)) throw err;
     return {
@@ -695,7 +693,7 @@ export async function executeDaemon(input: {
     };
   }
   try {
-    return mapResult(await runAttempt(ctx, prep, native, system, notes, daemon, resumeSessionFile, userPrompt), prep,
+    return mapResult(await runAttempt(ctx, prep, native, system, notes, daemon, resumeSessionFile, userPrompt, sources), prep,
                      daemon, false);
   } finally {
     await daemon.stopDaemon();

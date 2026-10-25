@@ -14,6 +14,7 @@ describe("getPrimeConfigSchema", () => {
       ["autonomousMaxTurns", "text"], ["autonomousMaxTokens", "text"], ["autonomousMaxContinuations", "text"],
       ["autonomousTimeoutMs", "text"], ["autonomousGates", "textarea"], ["autonomousGateRetries", "text"],
       ["autonomousGateTimeoutMs", "text"], ["rlmMaxDepth", "text"], ["subagentDefaultModel", "text"],
+      ["allowedModels", "textarea"],
     ]);
   });
   it("defaults credentialMode to host_auth and shows apiKeyEnvVar only for api_key", () => {

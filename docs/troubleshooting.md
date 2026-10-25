@@ -24,6 +24,7 @@ First run the environment test: `POST /api/companies/{companyId}/adapters/prime_
 | `prime_models_discovered` | check (info) | `prime-agent model list` returned models. | Nothing. |
 | `prime_models_empty` | check (warn) | The credential reaches no models. | Log in to a provider with Prime or use another credential. |
 | `prime_models_discovery_failed` | check (warn) | `prime-agent model list` failed. | Run it as the server user and read the first output line. |
+| `prime_models_skipped` | check (info) | `host_auth`: the environment test checks the host login file in place and lists no models, because the login is never linked into a temp dir. The first run checks the model. | Nothing; or use `api_key`. |
 | `prime_model_listed` | check (info) | The configured model is listed. Listed is not proof of entitlement; only a run proves that. | Nothing. |
 | `prime_model_unknown` | check (error) / thrown | The configured model is not in the list for this credential. The run is refused before spawn. | Pick an id from the list shown in the message. |
 | `prime_preflight_failed` | run result | A step before spawn failed (config, credential, version, model, skills). The saved session is kept. | Read `errorMeta.primeErrorCode` and fix that code. |
@@ -31,6 +32,11 @@ First run the environment test: `POST /api/companies/{companyId}/adapters/prime_
 | `prime_run_uncertain` | run result | Prime ended without an `agent_end` event (killed, crashed, lost). The outcome is unknown and the session is kept. | Read the issue and its comments before any retry; do not repeat a mutation blindly. |
 | `prime_run_timeout` | run result | `timeoutSec` was reached (the budget starts before seeding). | Raise `timeoutSec` or split the work. |
 | `prime_run_cancelled` | run result | The run was cancelled; Prime was never spawned after the cancel. | Nothing. |
+| `prime_settings_invalid` | run result | `<agentDir>/settings.json` exists but is not a JSON object, or cannot be read. Prime was not started and the file was not written. Applies with or without `allowedModels`. | Fix or remove the file. |
+| `prime_allowed_models_invalid` | run result | `allowedModels` or `modelRoles` is malformed, or `model`, `subagentDefaultModel` or a role is not in `allowedModels`. Prime was not started. | Fix the config; the message names the keys. |
+| `prime_settings_tampered` | run result | `allowedModels` set: a managed `settings.json` key differs after the run from what the adapter wrote. `resultJson.settings.tamperedKeys` names them. The run's own code is in `errorMeta.runErrorCode`. | Read the run log for who changed it. The next run writes the keys again. |
+| `prime_auth_tampered` | run result | `allowedModels` set, `api_key` mode: after the run `auth.json` is not a regular 0600 file whose only key is the configured provider. `resultJson.authCheck` has the key names (never values). | Find what wrote it. The next run replaces the file. |
+| `prime_model_audit_failed` | run result | `allowedModels` set: an actor ran a model outside the list, or an actor's model could not be read (no session file, a turn without `provider` or `model`, tokens but no turns, an unparseable line). `resultJson.modelAudit` names each actor. The usage row's model is the forbidden model, or `unverified`. | Treat as a policy breach until the audit shows otherwise. |
 | `prime_credential_mode_invalid` | thrown | `credentialMode` is not `host_auth` or `api_key`. | Fix `credentialMode`. |
 | `prime_api_key_env_var_required` | thrown | `credentialMode: "api_key"` without `apiKeyEnvVar`. | Set `apiKeyEnvVar`. |
 | `prime_path_invalid` | thrown | `cwd`, `hostAuthFile` or `agentDirRoot` is not absolute, or `cwd` is a protected path (§16 A15). | Use absolute paths and an allowed `cwd`. |
@@ -45,9 +51,9 @@ First run the environment test: `POST /api/companies/{companyId}/adapters/prime_
 
 **Adapter missing after a restart:** `GET /api/adapters/prime_agent_local` returns 404. `dist/index.js` is missing or the import failed. The server log has `Failed to dynamically load external adapter; skipping`. Run `npm run build` and reload.
 
-**Empty model list in the UI:** the list uses `~/.prime/agent/auth.json` of the Paperclip server user. Agents with `api_key` are checked by the environment test and at run time, not here. `listModels()` runs without agent context, so it resolves the default `prime-agent` on the server's PATH and ignores the agent's `command`. The attempt-1 smoke failed because that PATH omitted `~/.local/bin`; the adapter now falls back to `~/.local/bin/prime-agent`.
+**Model list in the UI:** `listModels()` runs `prime-agent model list` in a temp dir holding a placeholder Anthropic key, so it shows the Anthropic rows of Prime's catalog (16 rows on 0.10.1, including `anthropic/claude-opus-5-5`). It never links or reads the host login. Other providers' models are not offered there; type them into `model`. Each agent's own credential is checked by the environment test (`api_key`) and at run time. `listModels()` runs without agent context, so it resolves the default `prime-agent` on the server's PATH and ignores the agent's `command`. The attempt-1 smoke failed because that PATH omitted `~/.local/bin`; the adapter now falls back to `~/.local/bin/prime-agent`.
 
-If the list is still empty, either `prime-agent` is neither on the server's PATH nor at `~/.local/bin/prime-agent` of the server user, or `prime-agent model list` failed for the host login (the failure is not logged). Run `prime-agent model list` as the server user to see why. The agent's `command` does not affect this list; runs and the environment test use it.
+If the list is still empty, either `prime-agent` is neither on the server's PATH nor at `~/.local/bin/prime-agent` of the server user, or `prime-agent model list` failed (the failure is not logged). Run `prime-agent model list` as the server user to see why. The agent's `command` does not affect this list; runs and the environment test use it.
 
 **First run is slow:** Prime sets up its Python kernel once per server HOME (`› setting up python kernel (one-time, ~30s)…` on stderr).
 
@@ -55,6 +61,6 @@ If the list is still empty, either `prime-agent` is neither on the server's PATH
 
 **A resume file is missing:** Prime 0.10.0 does not fail on `-r <missing path>`; it silently starts a new session at that path. The adapter therefore passes `-r` only after reading a matching session header.
 
-**401 `OAuth access token has expired` in a long run:** the next run reads the refreshed token through the link; rerun the task.
+**401 `OAuth access token has expired` in a long run (`host_auth`):** Prime 0.10 refreshes by writing a new `auth.json` over the link, so the agent dir then holds its own copy and the host login is split. See [credentials](credentials.md#host_auth-unsafe-with-prime-010). Use `api_key`.
 
 **Processes left after a run:** list processes whose environment has `PRIME_AGENT_CODING_AGENT_DIR=<agent dir>`. None should remain after a run ends.

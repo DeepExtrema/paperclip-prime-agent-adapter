@@ -8,11 +8,14 @@ import {
 } from "@paperclipai/adapter-utils/server-utils";
 import { PrimeCliError, PrimeConfigError, PrimeCredentialError, type PrimeCredentialErrorCode } from "../errors.js";
 import { PRIME_SUPPORTED_VERSION_RANGE, type EphemeralPrimeAgentDir, type PrimeCheckCode, type PrimeRuntimeConfig } from "../types.js";
+import { resolvePrimeNativeConfig } from "./execute-daemon.js";
+import { resolvePrimeModelPolicy } from "./model-policy.js";
 import { assertPrimeModelListed, listPrimeModels } from "./models.js";
 import {
   assertPrimeCwdAllowed,
   buildPrimeChildEnv,
   createEphemeralPrimeAgentDir,
+  inspectHostAuth,
   resolvePrimeCommand,
   resolvePrimeRuntimeConfig,
   seedPrimeAgentDir,
@@ -64,6 +67,7 @@ export async function testEnvironment(ctx: AdapterEnvironmentTestContext): Promi
   let runtime: PrimeRuntimeConfig;
   try {
     runtime = resolvePrimeRuntimeConfig(ctx.config, { id: ENVIRONMENT_TEST_AGENT_ID, companyId: ctx.companyId }, resolvePaperclipInstanceRootForAdapter());
+    resolvePrimeModelPolicy(ctx.config, runtime, resolvePrimeNativeConfig(ctx.config)); // TAI-225 §9: allowedModels and modelRoles
   } catch (err) {
     checks.push({ code: configCheckCode(err), level: "error", message: errorMessage(err) });
     return finish();
@@ -120,12 +124,14 @@ export async function testEnvironment(ctx: AdapterEnvironmentTestContext): Promi
 
     let credentialReady = false;
     try {
-      const seeded = await seedPrimeAgentDir(ephemeral.plan, { provider: runtime.provider, env: runtime.env });
       if (runtime.credential.mode === "api_key") {
+        await seedPrimeAgentDir(ephemeral.plan, { provider: runtime.provider, env: runtime.env });
         const message = `API key from env var ${runtime.credential.apiKeyEnvVar} is set (value not shown).`;
         checks.push({ code: "prime_auth_api_key", level: "info", message });
       } else {
-        const message = `Host Prime auth file is present and safe (billing: ${seeded.billingType}).`;
+        // TAI-225 §9 item 8: the host login is checked in place and never linked into the temp dir.
+        const billingType = await inspectHostAuth(runtime.credential.hostAuthFile, runtime.provider);
+        const message = `Host Prime auth file is present and safe (billing: ${billingType}).`;
         checks.push({ code: "prime_auth_host_linked", level: "info", message });
       }
       credentialReady = true;
@@ -134,6 +140,11 @@ export async function testEnvironment(ctx: AdapterEnvironmentTestContext): Promi
     }
 
     if (!cliFound || !versionSupported || !credentialReady) return finish();
+    if (runtime.credential.mode === "host_auth") {
+      const message = "Model listing skipped: the host Prime login is never linked into a temporary dir (Prime 0.10 replaces the link when it refreshes). The first run checks the model.";
+      checks.push({ code: "prime_models_skipped", level: "info", message });
+      return finish();
+    }
 
     let models: AdapterModel[];
     try {

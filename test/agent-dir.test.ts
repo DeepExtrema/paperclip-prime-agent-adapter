@@ -88,11 +88,10 @@ describe("seedPrimeAgentDir host_auth link (INTERFACES §3 steps 1-2)", () => {
       expect(seeded.notes).toEqual([`Prime agent dir: ${plan.agentDir} (agent).`, `auth.json -> ${hostAuthFile} (host Prime credential).`]);
     },
   );
-  it("seeds an ephemeral dir the same way", async () => {
+  it("never links the host login into an ephemeral dir (TAI-225 §9 item 8)", async () => {
     const { plan, cleanup } = await createEphemeralPrimeAgentDir({ mode: "host_auth", hostAuthFile });
-    const seeded = await seedPrimeAgentDir(plan, { provider: "", env: {} });
-    expect(await fs.readlink(path.join(plan.agentDir, "auth.json"))).toBe(hostAuthFile);
-    expect(seeded.notes[0]).toBe(`Prime agent dir: ${plan.agentDir} (ephemeral).`);
+    await expect(seedPrimeAgentDir(plan, { provider: "", env: {} })).rejects.toMatchObject({ code: "prime_agent_dir_unsafe" });
+    expect(await fs.lstat(path.join(plan.agentDir, "auth.json")).catch(() => null)).toBeNull();
     await cleanup();
   });
 });
@@ -149,7 +148,7 @@ describe("seedPrimeAgentDir api_key (INTERFACES §3 step 3)", () => {
     expect(JSON.parse(await fs.readFile(authFile, "utf8"))).toEqual({ anthropic: { type: "api_key", key: "sk-ant-fixture" } });
     expect(await fs.readFile(hostAuthFile, "utf8")).toBe(hostBefore);
     expect(seeded).toMatchObject({ auth: "api_key_file", billingType: "api" });
-    expect(seeded.notes).toEqual([`Prime agent dir: ${plan.agentDir} (agent).`, "auth.json written from ANTHROPIC_API_KEY for provider anthropic."]);
+    expect(seeded.notes).toEqual([`Prime agent dir: ${plan.agentDir} (agent).`, "auth.json written from ANTHROPIC_API_KEY for provider anthropic (billing: api)."]);
     expect(JSON.stringify(seeded)).not.toContain("sk-ant-fixture");
     expect((await fs.readdir(plan.agentDir)).sort()).toEqual(["auth.json", "sessions"]);
   });
