@@ -807,6 +807,9 @@ export async function executeDaemon(input: {
   const {ctx, prep, native, system, notes, resumeSessionFile, userPrompt, sources, governed} = input;
   if (prep.runtime.extraArgs.length > 0)
     await ctx.onLog("stdout", '[paperclip] extraArgs are ignored with runtime "daemon".\n');
+  // TAI-273 §7 item 9 (N0 item 16): the 0.10.1 daemon accepts noContextFiles in create and ignores it.
+  if (prep.runtime.noContextFiles)
+    await ctx.onLog("stdout", '[paperclip] warning: noContextFiles has no effect with runtime "daemon": Prime 0.10.1 still loads AGENTS.md and CLAUDE.md.\n');
   let daemon: RunDaemon;
   try {
     daemon = await startDaemon(ctx, prep, sources);

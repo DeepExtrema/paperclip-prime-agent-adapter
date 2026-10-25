@@ -422,3 +422,9 @@ describe("daemon per run", () => {
     expect(result.exitCode).toBe(0); expect(starts()).toEqual([]);
   });
 });
+describe("noContextFiles under the daemon (TAI-273 §7 item 9)", () => {
+  it("logs one warning line, because the 0.10.1 daemon ignores it", async () => {
+    const { logs } = await run({ config: { noContextFiles: true } });
+    expect(logs.filter((l) => l.startsWith("[paperclip] warning: noContextFiles has no effect"))).toHaveLength(1);
+  });
+});
