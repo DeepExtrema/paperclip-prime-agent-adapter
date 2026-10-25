@@ -46,9 +46,16 @@ const rosterChanged = (s) => { for (const c of subscribers) send(c, { type: "ros
 const rosterRemoved = (id) => { for (const c of subscribers) send(c, { type: "roster_update", changed: [], removed: [id] }); };
 const send = (socket, message) => { if (!socket.destroyed) socket.write(`${JSON.stringify(message)}\n`); };
 // TAI-273 §2.2 item 12 (TAI-339 probe t2): get_model_catalog needs a session; until the GitHub fetch lands
-// (FAKE_DAEMON_CATALOG_READY_MS after start) every entry has reasoning false, and with FAKE_DAEMON_THINKING_RACE=1 a session
-// created then starts at "off" and ignores set_thinking_level (FAKE_DAEMON_THINKING_STUCK=1: always). FAKE_DAEMON_CATALOG: JSON model list. FAKE_DAEMON_CATALOG_REFRESH:
-// JSON model list that replaces it during the parent's turn, with a model_catalog_changed to every roster subscriber.
+// (FAKE_DAEMON_CATALOG_READY_MS after start) every entry has reasoning false. FAKE_DAEMON_CATALOG: JSON model list.
+// FAKE_DAEMON_CATALOG_REFRESH: JSON model list that replaces it during the parent's turn, with a model_catalog_changed to every
+// roster subscriber.
+// The 0.10.1 race (TAI-324 F1, Nexus n02): with FAKE_DAEMON_THINKING_RACE=1, a session created before the catalog lands is
+// stale (FAKE_DAEMON_STALE_AT_CREATE=1: every session). It starts at "off". set_thinking_level changes nothing until the catalog
+// lands; after that it changes what get_state shows, but the session's requests still carry no thinking. Only set_model reloads
+// the model and restores create's thinking level. FAKE_DAEMON_THINKING_STUCK=1: the level never changes ("new": only in a
+// session created without sessionPath).
+// Settings writes, as 0.10.1 makes them: set_thinking_level that changes the level writes defaultThinkingLevel; set_model writes
+// defaultProvider, defaultModel and recentModels. Each prompt is recorded as {kind: "request", thinking}.
 const startedAt = Date.now();
 const DEFAULT_CATALOG = ["claude-haiku-4-5", "claude-opus-4-7", "claude-opus-5-5"].map((id) => ({ provider: "anthropic", id, baseUrl: "https://api.anthropic.com", reasoning: true }));
 let refreshed = null;
@@ -106,27 +113,55 @@ function create(command, depth = 0) {
     mkdirSync(path.dirname(sessionFile), { recursive: true });
     writeFileSync(sessionFile, `${JSON.stringify({ type: "session", version: 3, id: sessionId, cwd: config.cwd, rlmDepth: depth })}\n`);
   }
+  const stale = (env.FAKE_DAEMON_THINKING_RACE === "1" && !catalogReady()) || env.FAKE_DAEMON_STALE_AT_CREATE === "1";
+  const stuck = env.FAKE_DAEMON_THINKING_STUCK === "1" || (env.FAKE_DAEMON_THINKING_STUCK === "new" && !sessionPath);
   const initial = JSON.parse(env.FAKE_DAEMON_INITIAL_STATS ?? '{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0,"cost":0}');
   const s = { id: `a${process.pid.toString(16)}${++nextSession}`.slice(0, 12), sessionId, sessionFile, cwd: config.cwd, config,
     provider: env.FAKE_DAEMON_MODEL_PROVIDER ?? config.provider ?? "anthropic", model: env.FAKE_DAEMON_MODEL_ID ?? config.model ?? "claude-opus-4-7",
-    thinking: (env.FAKE_DAEMON_THINKING_RACE === "1" && !catalogReady()) || env.FAKE_DAEMON_THINKING_STUCK === "1" ? "off" : config.thinking ?? "medium", streaming: env.FAKE_DAEMON_STREAMING_AT_START === "1", prompted: false, messages: 0, seq: 0,
+    stale, stuck, thinking: stale || stuck ? "off" : config.thinking ?? "medium", streaming: env.FAKE_DAEMON_STREAMING_AT_START === "1", prompted: false, messages: 0, seq: 0,
     stats: initial, last: null, clients: new Set(), pending: null, rlmMaxDepth: 2 };
+  // A resumed parent's old sessions, from its ledger (N0 item 4): roster_subscribe lists each depth >= 1 one as an inactive
+  // item with no activeSessionId, whose id is its sessionId (TAI-324 F2, Nexus n01); `list` does not list them.
+  const ledger = `${sessionFile}.fake-ledger.json`;
+  if (sessionPath && existsSync(ledger)) s.oldSessions = JSON.parse(readFileSync(ledger, "utf8"));
   sessions.set(s.id, s);
   return s;
 }
+const oldItem = (parent, old) => ({ agentId: `${parent.sessionFile}#${old.rlmChildId}`, status: "inactive",
+  summary: { id: old.sessionId, lifecycle: "live", activity: "idle", isSessionActive: false, rlmDepth: old.depth, sessionId: old.sessionId,
+    sessionFile: old.sessionFile, rlmChildId: old.rlmChildId, runtimeKind: "subagent" } });
+// FAKE_DAEMON_WAKE_OLD_MS: during its turn, the resumed parent wakes each old session. It comes back live under a new
+// activeSessionId, with the same sessionId and no parentActiveSessionId (Nexus n03, real 0.10.1).
+function wakeOld(parent) {
+  for (const old of parent.oldSessions ?? []) {
+    const woken = create({ config: parent.config, sessionPath: old.sessionFile }, old.depth);
+    Object.assign(woken, { depth: old.depth, discovered: true, running: false, ...(old.rlmChildId ? { rlmChildId: old.rlmChildId } : {}) });
+    rosterChanged(woken);
+  }
+}
 // An ended session leaves the roster. FAKE_DAEMON_WAKE_ENDED_MS: the parent wakes it again later, under a new activeSessionId.
+// FAKE_DAEMON_WAKE_VIA says which source shows it: "roster" (roster_update, the default), "list" (only a `list` row), or
+// "rlm_child_update" (an update on the parent, and gone again 300 ms later, so only the `list` that the update starts sees it).
 function endSession(s) {
   sessions.delete(s.id);
   rosterRemoved(s.id);
   if (env.FAKE_DAEMON_WAKE_ENDED_MS && s.depth !== undefined) setTimeout(() => {
     const woken = { ...s, id: `w${s.id}`.slice(0, 12), parentActive: null, streaming: true, clients: new Set() };
     sessions.set(woken.id, woken);
-    rosterChanged(woken);
+    const via = env.FAKE_DAEMON_WAKE_VIA ?? "roster";
+    if (via === "roster") rosterChanged(woken);
+    if (via === "rlm_child_update") {
+      const parent = [...sessions.values()].find((p) => p.depth === undefined);
+      if (parent) emit(parent, { type: "rlm_child_update", child: { activeSessionId: woken.id, status: "running" } });
+      setTimeout(() => sessions.delete(woken.id), 300);
+    }
   }, Number(env.FAKE_DAEMON_WAKE_ENDED_MS));
 }
 // FAKE_DAEMON_SPAWN: JSON list of depths. Each entry is one more session started during the parent's turn, with one audited turn.
 function spawnSessions(parent) {
   parent.spawned = [];
+  const ledger = `${parent.sessionFile}.fake-ledger.json`;
+  const entries = existsSync(ledger) ? JSON.parse(readFileSync(ledger, "utf8")) : [];
   for (const depth of JSON.parse(env.FAKE_DAEMON_SPAWN ?? "[]")) {
     const child = create({ config: parent.config }, depth);
     child.discovered = true; // a child or create_session session does its own discovery (N0 item 16, corrected)
@@ -138,7 +173,9 @@ function spawnSessions(parent) {
       model: env.FAKE_DAEMON_SPAWN_MODEL ?? child.model });
     rosterChanged(child);
     if (depth > 0) emit(parent, { type: "rlm_child_update", child: { activeSessionId: child.id, status: "running" } });
+    entries.push({ sessionId: child.sessionId, sessionFile: child.sessionFile, depth, rlmChildId: child.rlmChildId ?? null });
   }
+  if (entries.length > 0) writeFileSync(ledger, JSON.stringify(entries));
 }
 function finishPrompt(s, events) {
   for (const e of events) emit(s, e);
@@ -181,7 +218,8 @@ async function handle(socket, id, command) {
     }
     case "roster_subscribe":
       subscribers.add(socket);
-      return ok({ roster: [...sessions.values()].map(rosterItem) });
+      return ok({ roster: [...sessions.values()].flatMap((p) => [rosterItem(p), ...(p.oldSessions ?? [])
+        .filter((old) => old.depth >= 1 && ![...sessions.values()].some((live) => live.sessionId === old.sessionId)).map((old) => oldItem(p, old))]) });
     case "cancel_rlm_child": {
       const child = [...sessions.values()].find((c) => c.rlmChildId === command.childId);
       if (child) child.running = false;
@@ -197,11 +235,21 @@ async function handle(socket, id, command) {
     case "attach": s.clients.add(socket); return ok({ activeSessionId: s.id, snapshot: { activeSessionId: s.id, summary: summary(s), messages: [] } });
     case "detach": s.clients.delete(socket); return ok();
     case "set_thinking_level":
-      if (!(env.FAKE_DAEMON_THINKING_RACE === "1" && !catalogReady()) && env.FAKE_DAEMON_THINKING_STUCK !== "1") s.thinking = command.level;
+      if (!s.stuck && !(s.stale && !catalogReady()) && s.thinking !== command.level) {
+        s.thinking = command.level;
+        mergeJson(path.join(s.config.agentDir, "settings.json"), { defaultThinkingLevel: command.level });
+      }
       return ok();
     case "get_state": return ok({ thinkingLevel: s.thinking, model: { provider: s.provider, id: s.model } });
     case "get_model_catalog": return ok({ models: catalogModels() });
-    case "set_model": s.provider = command.provider; s.model = command.modelId; return ok();
+    case "set_model": {
+      s.provider = command.provider; s.model = command.modelId;
+      if (catalogReady() && !s.stuck) { s.stale = false; s.thinking = s.config.thinking ?? s.thinking; }
+      mergeJson(path.join(s.config.agentDir, "settings.json"), { defaultProvider: s.provider, defaultModel: s.model, recentModels: [`${s.provider}/${s.model}`] });
+      // The answer is the model's catalog entry (FAKE_DAEMON_SET_MODEL_ENTRY: JSON entry instead).
+      const entry = catalogModels().find((m) => m.provider === s.provider && m.id === s.model) ?? { provider: s.provider, id: s.model };
+      return ok(env.FAKE_DAEMON_SET_MODEL_ENTRY ? JSON.parse(env.FAKE_DAEMON_SET_MODEL_ENTRY) : entry);
+    }
     case "set_rlm_max_depth": s.rlmMaxDepth = command.maxDepth; return ok({ maxDepth: command.maxDepth, source: "chat", globalSaved: false });
     case "get_session_stats": {
       if (env.FAKE_DAEMON_CHILD_STATS_MISSING && s !== [...sessions.values()][0]) return fail("Child stats unavailable");
@@ -233,6 +281,8 @@ async function handle(socket, id, command) {
         return ok();
       }
       s.prompted = true;
+      record({ kind: "request", activeSessionId: s.id, sessionId: s.sessionId, thinking: s.stale ? null : s.thinking });
+      if (env.FAKE_DAEMON_WAKE_OLD_MS && s.oldSessions) setTimeout(() => wakeOld(s), Number(env.FAKE_DAEMON_WAKE_OLD_MS));
       const mode = env.FAKE_DAEMON_PROMPT_MODE ?? "ok";
       if (mode === "busy") return fail(PROCESSING);
       // FAKE_DAEMON_PERSISTENT_SHELL: a shell command started in its own session, recorded as Prime records

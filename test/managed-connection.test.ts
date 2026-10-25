@@ -1,6 +1,6 @@
 // TAI-273 plan rev 7 §3.2 (C1): managed_subscription, the fail-closed rule, the child-env rule and the error-code rule.
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -152,6 +152,20 @@ describe("C1 run (§3.2, §3.3)", () => {
       resultJson: { credential: { identitySuffix: SUFFIX } } });
     expect(existsSync(authFile())).toBe(false);
   });
+  // TAI-324 T4: every preflight step after the write. TMPDIR is read when the skills are staged, after the model list.
+  it.each([
+    ["the model list fails", () => ({ env: { FAKE_PRIME_MODEL_LIST: path.join(root, "missing-model-list.txt") } }), "prime_preflight_failed", "prime_model_list_failed", "model list` failed"],
+    ["the skills cannot be staged", () => { process.env.TMPDIR = path.join(root, "no-tmp"); return {}; }, "prime_preflight_failed", null, "paperclip-prime-skills-"],
+    ["settings.json is a directory", () => { mkdirSync(path.join(agentDir(), "settings.json"), { recursive: true }); return {}; }, "prime_settings_invalid", "prime_settings_invalid", "cannot be read (EISDIR)"],
+    ["settings.json is not JSON", () => { mkdirSync(agentDir(), { recursive: true }); writeFileSync(path.join(agentDir(), "settings.json"), "{"); return {}; }, "prime_settings_invalid", "prime_settings_invalid", "is not a JSON object"],
+  ])("deletes auth.json when %s", async (_name, setUp, errorCode, primeErrorCode, text) => {
+    const over = setUp();
+    const { result } = await run(over);
+    expect(result).toMatchObject({ errorCode, errorMeta: { primeErrorCode }, resultJson: { credential: { identitySuffix: SUFFIX } } });
+    expect(result.errorMessage).toContain(text);
+    expect(existsSync(authFile())).toBe(false);
+    expect(records().filter((r) => r.kind === "start")).toEqual([]);
+  });
   it("fails a run whose auth.json changed with prime_auth_tampered, and still deletes it", async () => {
     const { result } = await run({ env: { FAKE_DAEMON_EDIT_AUTH: JSON.stringify({ openai: { type: "api_key", key: "x" } }) } });
     expect(result).toMatchObject({ errorCode: "prime_auth_tampered", resultJson: { authCheck: { ok: false, keys: ["anthropic", "openai"] } } });
@@ -221,6 +235,18 @@ describe("testEnvironment (§3.2)", () => {
     expect(codes(mismatch)).not.toContain("info:prime_auth_managed_token_ok");
     const bound = await envTest({ managedAiConnection: BINDING, env: { CLAUDE_CODE_OAUTH_TOKEN: TOKEN } });
     expect([bound.status, codes(bound)]).toEqual(["fail", ["error:prime_managed_connection_invalid"]]);
+  });
+  it("reports prime_auth_managed_unregistered as an error when the registration failed (TAI-324 T6)", async () => {
+    await registerPrimeManagedConnection(async () => { throw new Error("Cannot find package '@paperclipai/shared'"); });
+    try {
+      const result = await envTest({ ...MANAGED, env: { CLAUDE_CODE_OAUTH_TOKEN: TOKEN } });
+      expect(codes(result)).toContain("error:prime_auth_managed_unregistered");
+      expect(codes(result)).not.toContain("info:prime_auth_managed_registered");
+      expect(result.status).toBe("fail");
+      expect(result.checks.find((c) => c.code === "prime_auth_managed_unregistered")?.message).toContain("Cannot find package");
+    } finally {
+      await registerPrimeManagedConnection();
+    }
   });
   it("checks the config without a token in the body, and reports no token check", async () => {
     const result = await envTest({ credentialMode: "managed_subscription", featureProfile: "governed-v1", allowedModels: [MODEL] });

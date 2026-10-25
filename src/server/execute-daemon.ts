@@ -616,7 +616,9 @@ async function runAttempt(
       };
       if (summary.provider !== runtime.provider || summary.model !== runtime.model)
         await must({type : "set_model", provider : runtime.provider, modelId : runtime.model});
-      if (runtime.thinking !== null && summary.thinkingLevel !== runtime.thinking)
+      // Under governed-v1, item 12's set_model restores create's level instead. A set_thinking_level that lands after the catalog
+      // on a stale session would change the level and write defaultThinkingLevel, a dangerous settings key (TAI-324 F1).
+      if (runtime.thinking !== null && summary.thinkingLevel !== runtime.thinking && !governed)
         await must({type : "set_thinking_level", level : runtime.thinking});
       if (native.rlmMaxDepth !== null) await must({type : "set_rlm_max_depth", maxDepth : native.rlmMaxDepth});
     };
@@ -633,7 +635,7 @@ async function runAttempt(
     // TAI-273 §2.2 item 12: the allowed models in the catalog, and the parent's thinking level, before the first prompt.
     const allowedModels = prep.policy.allowedModels ?? [];
     const confirmThinking = async (summary: SessionSummary): Promise<string | null> =>
-      (catalog && runtime.thinking !== null ? await confirmPrimeThinkingLevel(client, summary.activeSessionId, runtime.thinking, catalog) : null);
+      (catalog && runtime.thinking !== null ? await confirmPrimeThinkingLevel(client, summary.activeSessionId, `${runtime.provider}/${runtime.model}`, runtime.thinking, catalog) : null);
     const catalogFailed = (problem: string) => {
       catalog!.ok = false;
       catalog!.failure = problem;

@@ -31,8 +31,13 @@ const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 const POLL_MS = 5000;
 const DELETE_ATTEMPTS = 20;
 
-/** A flat `list` row, or a roster_subscribe / roster_update item `{ summary }`. */
+/**
+ * A flat `list` row, or a roster_subscribe / roster_update item `{ summary }`. An item with `status: "inactive"` is a resumed
+ * parent's old child from its ledger, not a session: it has no activeSessionId, and its `id` is its sessionId (TAI-324 F2). It
+ * counts only once the parent wakes it and it comes back live (§2.2 item 2, N0 item 4).
+ */
 export function readPrimeRosterRow(value: unknown): PrimeRosterRow | null {
+  if (isObject(value) && value.status === "inactive") return null;
   const row = isObject(value) && isObject(value.summary) ? value.summary : value;
   if (!isObject(row)) return null;
   const activeSessionId = str(row.activeSessionId) ?? str(row.id);

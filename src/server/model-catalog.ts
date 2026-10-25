@@ -51,15 +51,24 @@ export async function waitForPrimeCatalog(client: Requester, activeSessionId: st
   }
 }
 
-/** The thinking-level step: set_thinking_level again, then get_state. null when the reported level equals the configured one. */
-export async function confirmPrimeThinkingLevel(client: Requester, activeSessionId: string, thinking: string, record: PrimeModelCatalogRecord): Promise<string | null> {
-  const set = await client.request({ type: "set_thinking_level", activeSessionId, level: thinking }, 30_000)
-    .catch((err: unknown) => ({ success: false, error: err instanceof Error ? err.message : String(err) }));
+/**
+ * The thinking-level step (TAI-324 F1, proposed for rev 11 in TAI-342): set_model with the configured model, then get_state.
+ * A session created before the catalog lands keeps its model with no reasoning; set_thinking_level then changes what get_state
+ * shows but not the request, and writes defaultThinkingLevel to settings.json. set_model reloads the catalog entry and restores
+ * create's thinking level, so its answer must be that entry. null when the entry passes and get_state shows the configured level.
+ */
+export async function confirmPrimeThinkingLevel(client: Requester, activeSessionId: string, modelRef: string, thinking: string, record: PrimeModelCatalogRecord): Promise<string | null> {
+  const slash = modelRef.indexOf("/");
+  const set = await client.request({ type: "set_model", activeSessionId, provider: modelRef.slice(0, slash), modelId: modelRef.slice(slash + 1) }, 30_000)
+    .catch((err: unknown) => ({ success: false, error: err instanceof Error ? err.message : String(err), data: undefined }));
+  if (!set.success) return `set_model failed: ${set.error ?? "no error text"}`;
+  const entry = primeCatalogProblem({ models: [set.data] }, [modelRef], thinking);
+  if (entry) return `set_model answered ${entry.replace(`${modelRef} is not listed`, `no entry for ${modelRef}`)}`;
   const state = await client.request({ type: "get_state", activeSessionId }, 30_000)
     .catch((err: unknown) => ({ success: false, error: err instanceof Error ? err.message : String(err), data: undefined }));
   const level = state.success && isObject(state.data) && typeof state.data.thinkingLevel === "string" ? state.data.thinkingLevel : null;
   record.thinkingLevel = level;
   if (level === thinking) return null;
-  const why = !set.success ? `; set_thinking_level failed: ${set.error ?? "no error text"}` : !state.success ? `; get_state failed: ${state.error ?? "no error text"}` : "";
+  const why = !state.success ? `; get_state failed: ${state.error ?? "no error text"}` : "";
   return `thinking level is ${JSON.stringify(level)}, configured ${JSON.stringify(thinking)}${why}`;
 }

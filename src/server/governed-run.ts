@@ -193,7 +193,7 @@ async function workspaceFileProblem(cwd: string): Promise<string | null> {
 }
 
 /** Item 10: writes the managed bytes to a temp file in <cwd>/.prime/ (O_EXCL) and renames it onto the path, so it is never absent. */
-async function writeWorkspaceFile(cwd: string): Promise<void> {
+export async function writeWorkspaceFile(cwd: string): Promise<void> {
   const primeDir = path.join(cwd, ".prime");
   for (const dir of [primeDir, path.join(primeDir, "agent")]) {
     await fs.mkdir(dir, { mode: 0o755 }).catch((err: unknown) => { if (errno(err) !== "EEXIST") throw err; });

@@ -1,4 +1,4 @@
-// TAI-273 plan rev 9 §2.2 (G6): featureProfile "governed-v1", items 1-12 and the model-audit fix.
+// TAI-273 plan rev 10 §2.2 (G6): featureProfile "governed-v1", items 1-13 and the model-audit fix; TAI-324 round 1 (F1-F3, T1-T5).
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
@@ -20,23 +20,25 @@ const KEY = "sk-ant-api03-FIXTURE-governed-not-real";
 const sha = (text: string) => createHash("sha256").update(text).digest("hex");
 const savedEnv = { ...process.env };
 let root = "";
-type Rec = { kind: string; env?: Record<string, string>; command?: Record<string, unknown> & { type: string } };
+type Rec = { kind: string; env?: Record<string, string>; command?: Record<string, unknown> & { type: string }; activeSessionId?: string; thinking?: string | null };
 const rec = () => path.join(root, "daemon.jsonl");
 const records = (): Rec[] => (existsSync(rec()) ? readFileSync(rec(), "utf8").trim().split("\n").map((l) => JSON.parse(l) as Rec) : []);
 const commands = () => records().filter((r) => r.kind === "command").map((r) => r.command!);
 const types = () => commands().map((c) => c.type);
+/** The fake's record of each prompt that reaches a model: the session and the thinking level its request carries. */
+const requests = () => records().filter((r) => r.kind === "request");
 const ws = () => path.join(root, "ws");
 const agentDir = () => path.join(root, "agents", "agent-1", "prime-agent-home");
 const disabled = (...parts: string[]) => path.join(agentDir(), ".paperclip-disabled", "run-1", ...parts);
 const settings = () => JSON.parse(readFileSync(path.join(agentDir(), "settings.json"), "utf8")) as Record<string, unknown>;
 const write = (file: string, content: string) => { mkdirSync(path.dirname(file), { recursive: true }); writeFileSync(file, content); };
 const GOVERNED = { featureProfile: "governed-v1", credentialMode: "api_key", apiKeyEnvVar: "ANTHROPIC_API_KEY", allowedModels: [MODEL] };
-type Over = { config?: Record<string, unknown>; env?: Record<string, string>; sessionParams?: Record<string, unknown> | null; runId?: string };
+type Over = { config?: Record<string, unknown>; env?: Record<string, string>; sessionParams?: Record<string, unknown> | null; runId?: string; agentId?: string };
 async function run(over: Over = {}) {
   const logs: string[] = [];
   const ctx: AdapterExecutionContext = {
     runId: over.runId ?? "run-1",
-    agent: { id: "agent-1", companyId: "company-1", name: "Prime Tester", adapterType: "prime_agent_local", adapterConfig: {} },
+    agent: { id: over.agentId ?? "agent-1", companyId: "company-1", name: "Prime Tester", adapterType: "prime_agent_local", adapterConfig: {} },
     runtime: { sessionId: null, sessionParams: over.sessionParams ?? null, sessionDisplayId: null, taskKey: null },
     config: {
       runtime: "daemon", command: FAKE, model: MODEL, agentDirRoot: path.join(root, "agents"), paperclipRuntimeSkills: [], ...GOVERNED,
@@ -273,6 +275,11 @@ describe("item 2: sessions per run, keyed by sessionId", () => {
     expect(result.sessionParams).toBeUndefined();
     expect(log).toContain("was seen running again");
   });
+  it.each(["list", "rlm_child_update"])("fails the run when only a %s shows the ended session running (TAI-324 T5)", async (via) => {
+    const { result, log } = await spawn([1, 1], { FAKE_DAEMON_WAKE_ENDED_MS: "100", FAKE_DAEMON_WAKE_VIA: via, FAKE_DAEMON_PROMPT_DELAY_MS: "1500" });
+    expect(result).toMatchObject({ errorCode: "prime_subagent_limit_exceeded", clearSession: false });
+    expect(log).toContain("was seen running again");
+  });
   it("fails the run when an end does not work", async () => {
     const { result } = await spawn([0, 0], { FAKE_DAEMON_END_FAILS: "1" });
     expect(result).toMatchObject({ errorCode: "prime_subagent_limit_exceeded" });
@@ -283,6 +290,41 @@ describe("item 2: sessions per run, keyed by sessionId", () => {
     expect(result.errorCode).toBeNull();
     expect(log).toContain("Prime roster subscription failed");
     expect(report.sessionsEnded).toHaveLength(1);
+  });
+  // TAI-324 F2: a resumed parent's roster_subscribe lists its old child as an inactive ledger item whose id is its sessionId.
+  const resumeAfter = async (depths: number[], over: Over = {}) => {
+    const first = await run({ env: { FAKE_DAEMON_SPAWN: JSON.stringify(depths), FAKE_DAEMON_PROMPT_DELAY_MS: "800" } });
+    expect(first.report.sessions).toBe(depths.length);
+    const from = commands().length;
+    const second = await run({ runId: "run-2", sessionParams: first.result.sessionParams!, ...over });
+    return { first, second, commands: commands().slice(from), parent: commands().slice(from).find((c) => c.type === "attach")!.activeSessionId };
+  };
+  it("does not count, check or end a resumed parent's old child that is not woken (TAI-324 F2)", async () => {
+    const { second, commands: ran, parent } = await resumeAfter([1]);
+    expect(second.result).toMatchObject({ exitCode: 0, errorCode: null });
+    expect(second.report).toMatchObject({ sessions: 0, sessionSkillChecks: 0, sessionsEnded: [], warnings: [] });
+    expect(second.log).not.toContain("[paperclip] warning:");
+    expect(ran.filter((c) => ["get_system_prompt", "get_resource_snapshot", "get_session_stats"].includes(c.type)).every((c) => c.activeSessionId === parent)).toBe(true);
+    expect(ran.some((c) => ["cancel_rlm_child", "delete_rlm_subagent", "kill"].includes(c.type))).toBe(false);
+  });
+  it("counts a woken old child by its sessionId and checks it under its new activeSessionId (N0 item 4)", async () => {
+    const { first, second, commands: ran, parent } = await resumeAfter([1], { env: { FAKE_DAEMON_WAKE_OLD_MS: "100", FAKE_DAEMON_PROMPT_DELAY_MS: "800" } });
+    const oldChild = (first.result.resultJson as { modelAudit: { actors: Array<{ depth: number; sessionId: string }> } }).modelAudit.actors.find((a) => a.depth === 1)!.sessionId;
+    expect(second.result.errorCode).toBeNull();
+    expect(second.report).toMatchObject({ sessions: 1, sessionSkillChecks: 1, sessionsEnded: [] });
+    const checked = ran.filter((c) => c.type === "get_resource_snapshot" && c.activeSessionId !== parent).map((c) => c.activeSessionId);
+    expect(checked).toHaveLength(1);
+    expect(checked[0]).not.toBe(oldChild);
+  });
+  it("ends a woken old session over the cap, and fails when it is woken again (§6 rev 6 line 8, fake daemon)", async () => {
+    const capped = await resumeAfter([1, 0], { config: { maxSubagentsPerRun: 1 }, env: { FAKE_DAEMON_WAKE_OLD_MS: "100", FAKE_DAEMON_PROMPT_DELAY_MS: "800" } });
+    expect(capped.second.result.errorCode).toBeNull();
+    expect(capped.second.report.sessions).toBe(2);
+    expect(capped.second.report.sessionsEnded).toEqual([{ sessionId: expect.any(String), depth: 0, reason: "limit" }]);
+    const again = await run({ runId: "run-3", sessionParams: capped.second.result.sessionParams!, config: { maxSubagentsPerRun: 1 },
+      env: { FAKE_DAEMON_WAKE_OLD_MS: "100", FAKE_DAEMON_WAKE_ENDED_MS: "100", FAKE_DAEMON_PROMPT_DELAY_MS: "1500" } });
+    expect(again.result).toMatchObject({ errorCode: "prime_subagent_limit_exceeded", clearSession: false });
+    expect(again.log).toContain("was seen running again");
   });
   it("audits depth-0 sessions with allowedModels set, without governed-v1 too (§7 item 9)", async () => {
     writeFileSync(path.join(root, "host-auth.json"), JSON.stringify({ anthropic: { type: "oauth", access: "a", refresh: "r", expires: 0 } }), { mode: 0o600 });
@@ -327,14 +369,34 @@ describe("item 7: goals not set by Paperclip", () => {
     expect(second.report.foreignGoals).toMatchObject([{ action: "fresh_session" }]);
     expect(second.log).toContain(`Prime session ${String(first.result.sessionId)} holds a goal not set by Paperclip; starting a fresh session.`);
   });
-  it("runs item 10's check and item 12's thinking-level step on the fresh session too", async () => {
-    const { first } = await resumeWithGoal("Keep polling forever", { config: { thinking: "high" }, env: { FAKE_DAEMON_GOAL_CLEAR: "ignore" } });
+  const freshCommands = () => {
     const secondRun = commands().slice(commands().flatMap((c, index) => (c.type === "create" ? [index] : []))[1]);
-    const fresh = secondRun.filter((c) => c.type === "create" && !("sessionPath" in c)).length;
-    expect(fresh).toBe(1);
-    const after = secondRun.slice(secondRun.findIndex((c) => c.type === "kill"));
-    expect(after.map((c) => c.type).filter((t) => ["get_resource_snapshot", "get_state", "attach"].includes(t))).toEqual(["get_resource_snapshot", "get_state", "attach"]);
-    expect(first.result.errorCode).toBeNull();
+    expect(secondRun.filter((c) => c.type === "create" && !("sessionPath" in c))).toHaveLength(1);
+    return secondRun.slice(secondRun.findIndex((c) => c.type === "kill") + 1);
+  };
+  it("runs item 10's check and item 12's thinking-level step on the fresh session too", async () => {
+    const { second } = await resumeWithGoal("Keep polling forever", { config: { thinking: "high" }, env: { FAKE_DAEMON_GOAL_CLEAR: "ignore" } });
+    expect(second.result).toMatchObject({ exitCode: 0, errorCode: null, clearSession: false });
+    const after = freshCommands();
+    expect(after.map((c) => c.type).filter((t) => ["get_resource_snapshot", "set_model", "get_state", "attach"].includes(t))).toEqual(["get_resource_snapshot", "set_model", "get_state", "attach"]);
+    const fresh = after.find((c) => c.type === "attach")!.activeSessionId;
+    expect(after.filter((c) => ["get_resource_snapshot", "set_model", "get_state"].includes(c.type)).every((c) => c.activeSessionId === fresh)).toBe(true);
+    expect(second.report.modelCatalog).toMatchObject({ ok: true, thinkingLevel: "high" });
+  });
+  it("reloads a stale model in the fresh session too, so its first request has thinking (TAI-324 F3)", async () => {
+    const { second } = await resumeWithGoal("Keep polling forever", { config: { thinking: "high" }, env: { FAKE_DAEMON_GOAL_CLEAR: "ignore", FAKE_DAEMON_STALE_AT_CREATE: "1" } });
+    expect(second.result).toMatchObject({ exitCode: 0, errorCode: null, clearSession: false });
+    const fresh = freshCommands().find((c) => c.type === "attach")!.activeSessionId;
+    expect(requests().filter((r) => r.activeSessionId === fresh).map((r) => r.thinking)).toEqual(["high"]);
+    expect(settings()).not.toHaveProperty("defaultThinkingLevel");
+    expect(second.report.modelCatalog).toMatchObject({ ok: true, thinkingLevel: "high" });
+  });
+  it("fails before the first prompt when the fresh session's level stays off, with no clearSession (TAI-324 F3)", async () => {
+    const { second } = await resumeWithGoal("Keep polling forever", { config: { thinking: "high" }, env: { FAKE_DAEMON_GOAL_CLEAR: "ignore", FAKE_DAEMON_THINKING_STUCK: "new" } });
+    expect(second.result).toMatchObject({ errorCode: "prime_model_catalog_invalid", clearSession: false, executionRecovery: { kind: "bootstrap", providerWorkStarted: false } });
+    expect(second.result.sessionParams).toBeUndefined();
+    expect(second.report.modelCatalog).toMatchObject({ ok: false, thinkingLevel: "off", failure: 'thinking level is "off", configured "high"' });
+    expect(freshCommands().map((c) => c.type)).not.toContain("prompt_and_wait");
   });
   it("leaves a goal that matches adapterConfig.goal alone", async () => {
     const first = await run({ config: { goal: "Ship it" } });
@@ -350,17 +412,52 @@ describe("item 12: the model catalog and the parent's thinking level", () => {
   const bootstrap = { errorCode: "prime_model_catalog_invalid", clearSession: false, executionRecovery: { kind: "bootstrap", providerWorkStarted: false } };
   it("checks after the parent's skill check and before /goal clear, with the parent's activeSessionId", async () => {
     await run({ config: { thinking: "high" } });
-    const order = types().filter((t) => ["create", "get_resource_snapshot", "get_model_catalog", "get_state", "attach", "prompt_and_wait"].includes(t));
-    expect(order).toEqual(["create", "get_resource_snapshot", "get_model_catalog", "get_state", "attach", "prompt_and_wait"]);
+    const order = types().filter((t) => ["create", "get_resource_snapshot", "get_model_catalog", "set_model", "get_state", "attach", "prompt_and_wait"].includes(t));
+    expect(order).toEqual(["create", "get_resource_snapshot", "get_model_catalog", "set_model", "get_state", "attach", "prompt_and_wait"]);
+    expect(commands().find((c) => c.type === "set_model")).toMatchObject({ provider: "anthropic", modelId: "claude-haiku-4-5" });
     const created = commands().find((c) => c.type === "get_resource_snapshot")!.activeSessionId;
     expect(commands().find((c) => c.type === "get_model_catalog")!.activeSessionId).toBe(created);
   });
-  it("waits for a catalog that lands after create, then sets the thinking level again (TAI-339 change 1)", async () => {
+  it("waits for a catalog that lands after create, then reloads the model with set_model, so the first request has thinking (TAI-324 F1)", async () => {
     const { result, report } = await run({ config: { thinking: "high" }, env: { FAKE_DAEMON_CATALOG_READY_MS: "1200", FAKE_DAEMON_THINKING_RACE: "1" } });
     expect(result).toMatchObject({ exitCode: 0, errorCode: null });
     expect(report.modelCatalog).toMatchObject({ ok: true, refreshesSeen: 0, thinkingLevel: "high", failure: null });
     expect(report.modelCatalog.checks).toBeGreaterThan(1);
-    expect(commands().filter((c) => c.type === "set_thinking_level")).toHaveLength(2);
+    expect(requests().map((r) => r.thinking)).toEqual(["high"]);
+    // Under governed-v1 no set_thinking_level is sent at all, so no defaultThinkingLevel is written; set_model restores create's level.
+    expect(types()).not.toContain("set_thinking_level");
+    expect(types().lastIndexOf("get_model_catalog")).toBeLessThan(types().indexOf("set_model"));
+    expect(settings()).not.toHaveProperty("defaultThinkingLevel");
+    expect(settings()).toMatchObject({ defaultProvider: "anthropic", defaultModel: "claude-haiku-4-5", recentModels: [MODEL] });
+    expect(report.settingsKeysRemoved).toEqual([]);
+  });
+  it("models 0.10.1: set_thinking_level alone after the catalog shows the level in get_state, sends no thinking and writes defaultThinkingLevel", async () => {
+    const { PrimeDaemonClient } = await import("../src/server/execute-daemon.js");
+    const agent = path.join(root, "probe-agent");
+    mkdirSync(agent, { recursive: true });
+    writeFileSync(path.join(agent, "settings.json"), "{}");
+    const socket = path.join(root, "probe.sock");
+    const child = spawn(process.execPath, [FAKE, "--mode", "daemon", "--daemon-socket", socket],
+      { env: { ...process.env, FAKE_DAEMON_RECORD: rec(), FAKE_DAEMON_CATALOG_READY_MS: "300", FAKE_DAEMON_THINKING_RACE: "1" }, stdio: "ignore" });
+    try {
+      let client: Awaited<ReturnType<typeof PrimeDaemonClient.connect>> | null = null;
+      for (let i = 0; i < 100 && !client; i += 1) client = await PrimeDaemonClient.connect(socket, 500).catch(async () => { await new Promise((r) => setTimeout(r, 30)); return null; });
+      const ask = async (command: Record<string, unknown> & { type: string }) => (await client!.request(command, 5000)) as { success: boolean; data?: any };
+      const id = (await ask({ type: "create", config: { cwd: ws(), agentDir: agent, sessionDir: path.join(agent, "sessions"), provider: "anthropic", model: "claude-haiku-4-5", thinking: "high" } })).data.activeSessionId;
+      await ask({ type: "set_thinking_level", activeSessionId: id, level: "high" });
+      expect((await ask({ type: "get_state", activeSessionId: id })).data.thinkingLevel).toBe("off");
+      await new Promise((r) => setTimeout(r, 400));
+      await ask({ type: "set_thinking_level", activeSessionId: id, level: "high" });
+      expect((await ask({ type: "get_state", activeSessionId: id })).data.thinkingLevel).toBe("high");
+      await ask({ type: "prompt_and_wait", activeSessionId: id, message: "one" });
+      expect(JSON.parse(readFileSync(path.join(agent, "settings.json"), "utf8"))).toEqual({ defaultThinkingLevel: "high" });
+      const reloaded = await ask({ type: "set_model", activeSessionId: id, provider: "anthropic", modelId: "claude-haiku-4-5" });
+      expect(reloaded.data).toMatchObject({ provider: "anthropic", id: "claude-haiku-4-5", baseUrl: "https://api.anthropic.com", reasoning: true });
+      await new Promise((r) => setTimeout(r, 50));
+      await ask({ type: "prompt_and_wait", activeSessionId: id, message: "two" });
+      expect(requests().map((r) => r.thinking)).toEqual([null, "high"]);
+      client!.close();
+    } finally { child.kill("SIGKILL"); }
   });
   it("fails before any prompt when the catalog never shows the model with reasoning in 15 s", async () => {
     const { result, report, log } = await run({ config: { thinking: "high" }, env: { FAKE_DAEMON_CATALOG_READY_MS: "60000" } });
@@ -382,10 +479,21 @@ describe("item 12: the model catalog and the parent's thinking level", () => {
     const { result } = await run({ env: { FAKE_DAEMON_CATALOG: JSON.stringify([entry(), entry({ id: "n0-probe", baseUrl: "http://127.0.0.1:9" })]) } });
     expect(result.errorCode).toBeNull();
   });
-  it("fails when the thinking level does not take", async () => {
+  it("fails before the first prompt when the level stays off after set_model, and sends no set_thinking_level", async () => {
     const { result, report } = await run({ config: { thinking: "high" }, env: { FAKE_DAEMON_THINKING_STUCK: "1" } });
     expect(result).toMatchObject(bootstrap);
+    expect(result.sessionParams).toBeUndefined();
     expect(report.modelCatalog).toMatchObject({ ok: false, thinkingLevel: "off", failure: 'thinking level is "off", configured "high"' });
+    expect(types()).not.toContain("prompt_and_wait");
+    expect(types()).not.toContain("set_thinking_level");
+  });
+  it("fails when set_model answers an entry at another address or with no reasoning", async () => {
+    const moved = await run({ config: { thinking: "high" }, env: { FAKE_DAEMON_SET_MODEL_ENTRY: JSON.stringify(entry({ baseUrl: "https://elsewhere.invalid" })) } });
+    expect(moved.result).toMatchObject(bootstrap);
+    expect(moved.report.modelCatalog.failure).toBe(`set_model answered ${MODEL} has baseUrl "https://elsewhere.invalid", not https://api.anthropic.com`);
+    const flat = await run({ runId: "run-2", config: { thinking: "high" }, env: { FAKE_DAEMON_SET_MODEL_ENTRY: JSON.stringify(entry({ reasoning: false })) } });
+    expect(flat.report.modelCatalog.failure).toBe(`set_model answered ${MODEL} has no reasoning (thinking is high)`);
+    expect(types()).not.toContain("prompt_and_wait");
   });
   it("re-checks after model_catalog_changed during the run, and fails the run with no clearSession", async () => {
     const { result, report, log } = await run({ env: { FAKE_DAEMON_PROMPT_DELAY_MS: "800",
@@ -470,6 +578,20 @@ describe("G3 item 5: persistent shells end with the run (TAI-340 change 1)", () 
     const size = statSync(marker).size;
     await new Promise((resolve) => setTimeout(resolve, 300));
     expect(statSync(marker).size).toBe(size);
+  });
+  it("a shell that rewrites settings.json in a loop cannot change it after the run-end check (4.3 bullet 7, TAI-324 T3)", async () => {
+    const file = path.join(agentDir(), "settings.json");
+    const script = path.join(root, "rewrite-settings.sh");
+    writeFileSync(script, `while true; do printf '%s' '{"shellPath":"/bin/evil"}' > '${file}.x'; mv '${file}.x' '${file}'; sleep 0.05; done\n`);
+    const { result, report } = await run({ env: { FAKE_DAEMON_PROMPT_DELAY_MS: "500", FAKE_DAEMON_PERSISTENT_SHELL: `timeout 600 sh ${script}` } });
+    const [rec] = fromRecords();
+    expect(result).toMatchObject({ errorCode: "prime_settings_tampered", resultJson: { settings: { dangerousKeys: ["shellPath"] } } });
+    expect(report.persistentShellsKilled).toMatchObject([{ pid: rec!.pid, when: "run_end", stopped: true }]);
+    expect(members(rec!.pid)).toEqual([]);
+    const after = readFileSync(file, "utf8");
+    expect(JSON.parse(after)).not.toHaveProperty("shellPath");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(readFileSync(file, "utf8")).toBe(after);
   });
   it("ends a shell left by an earlier run at run start, before item 11 moves persistent-shells/", async () => {
     const pid = shell("sleep 600");
@@ -670,13 +792,43 @@ describe("item 10: the skill list, in the parent and in every other session", ()
     mkdirSync(path.join(shared, "agent"), { recursive: true });
     const links = JSON.stringify({ [path.join(ws(), ".prime")]: shared });
     const { result, report } = await run({ env: { FAKE_DAEMON_REMOVE_FILES: JSON.stringify([path.join(ws(), ".prime")]), FAKE_DAEMON_LINKS: links } });
-    expect(result.errorCode).toBe("prime_settings_tampered");
+    expect(result).toMatchObject({ errorCode: "prime_settings_tampered", clearSession: false });
     expect(existsSync(path.join(shared, "agent", "settings.json"))).toBe(false);
     expect(lstatSync(path.join(ws(), ".prime")).isDirectory()).toBe(true);
     expect(readlinkSync(path.join(ws(), ".prime.disabled-run-1-end"))).toBe(shared);
     expect(report.projectConfigCreated).toEqual([{ path: ".prime", sha256: null }]);
     expect(report.warnings).toContain("workspace .prime was a symlink; moved aside");
     expect(readFileSync(workspaceFile(), "utf8")).toBe(WORKSPACE_SETTINGS);
+  });
+  it("restores through no symlink: a .prime/agent link put back during the run is moved aside first (TAI-324 T2)", async () => {
+    const shared = path.join(root, "shared");
+    mkdirSync(shared, { recursive: true });
+    const agentLink = path.join(ws(), ".prime", "agent");
+    const { result, report } = await run({ env: { FAKE_DAEMON_REMOVE_FILES: JSON.stringify([agentLink]), FAKE_DAEMON_LINKS: JSON.stringify({ [agentLink]: shared }) } });
+    expect(result).toMatchObject({ errorCode: "prime_settings_tampered", clearSession: false });
+    expect(readdirSync(shared)).toEqual([]);
+    expect(readlinkSync(path.join(ws(), ".prime", "agent.disabled-run-1-end"))).toBe(shared);
+    expect(lstatSync(agentLink).isDirectory()).toBe(true);
+    expect(readFileSync(workspaceFile(), "utf8")).toBe(WORKSPACE_SETTINGS);
+    expect(report.projectConfigCreated).toEqual([{ path: path.join(".prime", "agent"), sha256: null }]);
+    expect(report.warnings).toContain("workspace .prime/agent was a symlink; moved aside");
+  });
+  it("two agents' runs that overlap in one cwd keep the file: neither start replaces it, neither end deletes it (TAI-324 T1)", async () => {
+    await run({ runId: "run-0" }); // the file exists, as after any earlier run in this cwd
+    const ino = lstatSync(workspaceFile()).ino;
+    const seen = new Set<number>();
+    const watch = setInterval(() => { try { const st = lstatSync(workspaceFile()); if (readFileSync(workspaceFile(), "utf8") === WORKSPACE_SETTINGS) seen.add(st.ino); else seen.add(-1); } catch { seen.add(-2); } }, 10);
+    try {
+      const a = run({ runId: "run-a", env: { FAKE_DAEMON_PROMPT_DELAY_MS: "1200" } });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const b = await run({ runId: "run-b", agentId: "agent-2", env: { FAKE_DAEMON_PROMPT_DELAY_MS: "300" } });
+      const first = await a;
+      expect([first.result.errorCode, b.result.errorCode]).toEqual([null, null]);
+      expect([first.report.projectConfigDisabled, b.report.projectConfigDisabled, first.report.projectConfigCreated, b.report.projectConfigCreated]).toEqual([[], [], [], []]);
+    } finally { clearInterval(watch); }
+    expect([...seen]).toEqual([ino]);
+    expect(lstatSync(workspaceFile()).ino).toBe(ino);
+    expect(records().filter((r) => r.kind === "start")).toHaveLength(3);
   });
   it("keeps clearSession: true when the agent-dir settings also failed", async () => {
     const { result } = await run({ env: { FAKE_DAEMON_REMOVE_FILES: JSON.stringify([path.join(ws(), ".prime")]),
