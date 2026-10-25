@@ -1,6 +1,6 @@
 # N0: Prime Agent 0.10.1 offline facts (TAI-273 plan rev 4, section 5 step 2)
 
-Recorded by Nexus on 2026-10-25 for TAI-323. Every fact below was observed on this host, offline, with the scripts in `scripts/n0/`, unless it is marked `unverified` or "from the binary's strings".
+Recorded by Nexus on 2026-10-25 for TAI-323. Item 16 and contradictions 7 and 8 were added the same day, for the five N0 lines new in plan rev 5 (revision `38d350eb`). Every fact below was observed on this host, offline, with the scripts in `scripts/n0/`, unless it is marked `unverified` or "from the binary's strings".
 
 ## How the facts were taken
 
@@ -140,6 +140,32 @@ The full adapter `execute()` (e10) passed these keys through `adapterConfig.env`
 
 Before the push, the host's `isAiConnectionCompatible({anthropic, subscription, responsible_user}, "prime_agent_local", …)` was false. After the adapter side pushed `"prime_agent_local"` into `anthropic.methods.subscription.adapters`, it was true. The `api_key` array stayed `["claude_local"]`, and an `api_key`-only requirement stayed false. `isAiConnectionCompatible` is the gate that `select()` calls (`server/dist/services/ai-connections.js:117-120`). For `responsible_user` it accepts any method whose array holds the type.
 
+### 16. Rev 5: skill discovery off, the skill list of children, the default built-ins, prompt templates (2.2 items 9 and 10)
+
+Added for plan rev 5 (e24–e27). Each session had a skill in every found place: `<agentDir>/skills/<dir>/SKILL.md`, a loose `<agentDir>/skills/x.md`, `<cwd>/.prime/agent/skills/`, `<cwd>/.agents/skills/`, a `.agents/skills/` two dirs above `cwd`, `$HOME/.agents/skills/` and a path in `settings.json` `skills`. One more skill was passed by path in the create config's `skills`. The skill list was read from `<available_skills>` in each session's first model request, and checked against `get_resource_snapshot` (the two always matched). **Resources load lazily:** the snapshot is empty until a command such as `get_commands` or a prompt has run.
+
+**There is no daemon `create` field that turns skill discovery off** (e24, e25, e26).
+- `noSkills: true` in the create config is accepted (`success:true`) and ignored. All seven found skills still loaded in the parent, the depth-1 child and the `create_session` session (e24).
+- So is every other name I tried (e26): `noSkills`, `noPromptTemplates`, `noThemes`, `skillDiscovery: false|"off"`, `discoverSkills`, `disableSkillDiscovery`, `noSkillDiscovery`, `includeDefaultSkills`, `enableBuiltinSkills`, `builtinSkills`, `discovery`, `noDiscovery`, `resources: {…}`, `resourceSelection`, a nested `settings` object, and `executionMode: "headless"` with `noSkills`. Each one left the skill, prompt and context file counts unchanged. Unknown create config keys are ignored silently, so a list of names cannot prove a negative. But the CLI's own daemon client sends none either: under a pseudo-terminal, `prime-agent --no-skills --no-prompt-templates --no-context-files` sent `create` with `config: {cwd, executionMode:"interactive", sessionDir, provider, model, telemetryDisabled}` and nothing more (e25). The print, `json` and `rpc` modes never open the daemon socket.
+- **`noContextFiles: true` in the create config is ignored too** (e26). The adapter sends it today when `noContextFiles` is set (`execute-daemon.ts:403`). In 0.10.1 daemon mode, `cwd`'s `AGENTS.md` still loads with it.
+
+**`settings.json` can do it instead** (e27, e24):
+- `enableBuiltinSkills: false` (agent-dir settings) drops all 12 built-ins and nothing else.
+- `skills: ["!**"]` in the **agent dir's** `settings.json` drops every user-scope found skill: `<agentDir>/skills/` (the loose `.md` too), `$HOME/.agents/skills/` and the built-ins. `"!**/*"` and `"!*"` act the same. **Project-scope skills stay**: `<cwd>/.prime/agent/skills/`, `<cwd>/.agents/skills/` and the parent `.agents/skills/` (e24, `source: auto`, `scope: project`).
+- With `skills: ["!**"]` in **both** the agent dir's and `<cwd>/.prime/agent/settings.json`, only the create config's `skills` list loaded: the staged skill and every built-in passed by path as `<release>/skills/<name>`. That held in the parent, the depth-1 child and the `create_session` session. No found skill's text was anywhere in their requests (e24).
+- `enableSkillCommands: false` changed nothing in the skill list.
+- Not tested: whether a `!` pattern in the project file alone, without the agent-dir one, also drops user-scope skills; and a `.gitignore`-style ignore file in a skills dir (the 0.8 TS source reads them).
+
+**Children and `create_session` sessions get the parent's skill list.** In all four e24 runs (default, `noSkills`, agent-dir exclude, both excludes), the depth-1 child's and the `create_session` session's `<available_skills>` equalled the parent's, name for name.
+
+**The built-ins a default 0.10.1 daemon session loads** (no websearch key, no MCP login, factory off; e12, e24, e26): `agent-message`, `agent-observe`, `attach-image`, `compact`, `edit`, `goal`, `mcp`, `prime-intellect`, `refine`, `rlm-heartbeat`, `skill-creator`, `websearch`, which makes 12. `<release>/skills/factory/SKILL.md` does not load. The snapshot gives a warning for it, "description is required". Passing all of them by path reproduces the same 12 names, without `factory`.
+
+**Prompt templates do not reach the model unless a user types them** (e24). Templates in `<agentDir>/prompts/` and `<cwd>/.prime/agent/prompts/` appear only in `get_commands` and in the snapshot. Neither their description nor their body was in any model request: system prompt, messages or tools. A child prompt written by the model, `rlm.spawn('/n0tmpl-agent')`, reached the child as `[task from parent]\n\n/n0tmpl-agent`, not expanded. The same text sent by the client with `prompt_and_wait` was expanded to the body. Not tested: text that starts with `/` in `agent_message.send`, in a heartbeat or schedule prompt, or in a goal objective.
+
+**Parent-dir context files** are in item 9: `AGENTS.md`, or `CLAUDE.md` when that dir has no `AGENTS.md`, from every ancestor of `cwd` up to `/`, with no stop at a `.git` dir. For `.agents/skills/` I saw a parent two levels up load, with no git repo on the path. Where that walk stops when there is a git root was not tested.
+
+**`<agentDir>/skills/` again:** in e24, Prime added nothing there; the dir held only the two staged entries at the end. Item 11 still holds.
+
 ## New facts the plan does not have
 
 1. **A daemon start reaches GitHub.** At daemon start, Prime opened 3 HTTPS connections to `raw.githubusercontent.com` (refused here). The binary names `PrimeIntellect-ai/prime-agent-catalog/main/models/catalog.v1.json` and a `plugins/catalog.v…` file. Offline, `anthropic/claude-opus-5-5` resolves as a model with `reasoning: false`, because the bundled `models.bundled.json` holds fixtures only. So the live model list, and Opus 5.5's thinking support, come from that fetch. `--offline` ("Disable startup network operations") exists; I did not test it in daemon mode.
@@ -158,6 +184,8 @@ Before the push, the host's `isAiConnectionCompatible({anthropic, subscription, 
 4. **2.2 item 6, 2.4 and section 7 item 14, workspace context files.** The plan's known exception is `cwd`'s own `AGENTS.md` and `CLAUDE.md`. Prime also loads `AGENTS.md`, or `CLAUDE.md` when there is no `AGENTS.md`, from **every ancestor of `cwd`** up to `/`. An agent that writes one in a parent dir (for example `…/instances/default/workspaces/AGENTS.md`) changes the next run's prompt for every agent whose workspace is below it, and the `cwd`-only hashes would not see it. None exist today.
 5. **2.2 item 1, the `retry` value.** The plan wants Prime's default `retry` with `waitForUsage` neither waiting nor parking. I could not make Prime park on any fake 429, with or without `waitForUsage.enabled/pauseUntilReset`, and the binary does not give the 8 `waitForUsage` field names with certainty. What is shown: a partial `retry` object keeps the other defaults, and by default a 429 fails the turn after 3 retries. The exact managed `retry` value needs Axiom's call.
 6. **2.2 item 1, `autoRefine`.** The plan says autoRefine runs a review every N assistant turns. I could not make 0.10.1 run one offline. That is not proof that it never runs, so `autoRefine:{enabled:false}` stays the safe value, but its effect is `unverified`.
+7. **2.2 item 10, the discovery-off field (rev 5).** The daemon `create` config has no `noSkills` or any other field that turns discovery off; `noSkills: true` is ignored (item 16). By the plan's text, that selects item 10's fallback. But `settings.json` can do the same job: `skills: ["!**"]` in the agent dir's file and in `<cwd>/.prime/agent/settings.json`, and the explicit `skills` list still loads, in children too. The agent-dir file is the adapter's own (2.2 item 5). The project file sits inside `<cwd>/.prime/agent/`, which item 6 moves aside every run, so the adapter would have to write it after the move. Which branch to take is Axiom's call.
+8. **2.2 item 6 and the existing `noContextFiles` option.** In 0.10.1 daemon mode, `noContextFiles: true` in the create config is ignored, and `AGENTS.md` still loads (item 16). The plan relies on it in no `governed-v1` path. But the adapter's current `noContextFiles` option does nothing under `runtime: "daemon"`, and option (b) in the checkpoint's contradiction 4 ("force `noContextFiles`") would not work as a create field.
 
 ## What N0 settles for the checkpoint branches
 
@@ -167,7 +195,8 @@ Before the push, the host's `isAiConnectionCompatible({anthropic, subscription, 
 | 2.2 item 2, poll or subscription | `roster_subscribe` delivers `roster_update` during a turn. |
 | 2.2 item 7 | `create` with `sessionPath` started no turn, and `/goal clear` clears from outside the model, so the `cleared` branch is available. |
 | 2.2 item 8 | non-memory global kinds (`prompt`, `skill`, `subagent`) reach later sessions, so the strip branch applies. |
-| 2.2 item 9, condition | Prime wrote nothing under `<agentDir>/skills/`. The condition holds; Sentinel's verdict (TAI-322) decides. |
+| 2.2 item 9, exemptions | Prime wrote nothing under `<agentDir>/skills/` in any run (items 11 and 16). No name needs an exemption. Sentinel accepted item 9 (TAI-322, rev 5). |
+| 2.2 item 10 | No `create` field turns discovery off. `settings.json` `skills: ["!**"]`, in the agent dir and in the project, does, and the explicit list still loads. Children and `create_session` sessions get the parent's list. The default built-in allowlist is the 12 names in item 16. Prompt templates do not reach the model untyped, so `noPromptTemplates` is not needed (and there is no create field for it either). |
 | F14 and 2.3 kernel keys | all three honoured; reuse with no download; the interpreter is under `prime-kernel/python`. |
 | 4.3 item 5 | workers lead their own process group. |
 
@@ -179,3 +208,7 @@ Before the push, the host's `isAiConnectionCompatible({anthropic, subscription, 
 - clearing a `paused` goal with `/goal clear`
 - whether the session that ran `refine.run(global_=True)` sees its own edit
 - the effect of `--offline` in daemon mode on the catalog fetch and the model list
+- that no daemon `create` field turns discovery off (only the names in item 16 were tried; unknown keys are ignored silently)
+- whether a project-file `!` pattern alone also drops user-scope skills, and ignore files in skills dirs
+- where the `.agents/skills/` walk stops at a git root
+- whether text that starts with `/` in `agent_message.send`, a heartbeat, a schedule or a goal objective expands a prompt template

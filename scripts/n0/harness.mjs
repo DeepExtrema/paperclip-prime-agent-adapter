@@ -54,10 +54,10 @@ export function primeEnv(s, extra = {}) {
 }
 
 /** Runs prime-agent once (not the daemon) and returns its output. */
-export function runPrime(s, args, { env = {}, cwd = s.work, timeoutMs = 60_000 } = {}) {
+export function runPrime(s, args, { env = {}, cwd = s.work, timeoutMs = 60_000, command = PRIME } = {}) {
   fs.mkdirSync(path.join(s.dir, "tmp"), { recursive: true });
   return new Promise((resolve) => {
-    const child = spawn(PRIME, args, { cwd, env: primeEnv(s, env), stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(command, args, { cwd, env: primeEnv(s, env), stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (c) => (stdout += c));
