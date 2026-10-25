@@ -1,6 +1,6 @@
 # N0: Prime Agent 0.10.1 offline facts (TAI-273 plan rev 4, section 5 step 2)
 
-Recorded by Nexus on 2026-10-25 for TAI-323. Item 16 and contradictions 7 and 8 were added the same day, for the five N0 lines new in plan rev 5 (revision `38d350eb`). Every fact below was observed on this host, offline, with the scripts in `scripts/n0/`, unless it is marked `unverified` or "from the binary's strings".
+Recorded by Nexus on 2026-10-25 for TAI-323. Item 16 and contradictions 7 and 8 were added the same day, for the five N0 lines new in plan rev 5 (revision `38d350eb`). Item 17 holds addenda A and B from Axiom's checkpoint answer. Every fact below was observed on this host, offline, with the scripts in `scripts/n0/`, unless it is marked `unverified` or "from the binary's strings".
 
 ## How the facts were taken
 
@@ -165,6 +165,23 @@ Added for plan rev 5 (e24–e27). Each session had a skill in every found place:
 **Parent-dir context files** are in item 9: `AGENTS.md`, or `CLAUDE.md` when that dir has no `AGENTS.md`, from every ancestor of `cwd` up to `/`, with no stop at a `.git` dir. For `.agents/skills/` I saw a parent two levels up load, with no git repo on the path. Where that walk stops when there is a git root was not tested.
 
 **`<agentDir>/skills/` again:** in e24, Prime added nothing there; the dir held only the two staged entries at the end. Item 11 still holds.
+
+### 17. Checkpoint addenda A and B (Axiom's `checkpoint` document, sections 7 and 9)
+
+**A. Top-level agent-dir entries that Prime writes in a normal daemon run.** I listed the agent dir of both e10 adapter runs, and every N0 scratch agent dir (71 dirs). Prime wrote these entries that are not on Axiom's item 11 keep-list:
+- `daemon-workers/` (every run): one dir per daemon, with each worker's `<id>.json`, `recovery.jsonl`, `orphans.jsonl`, writer locks and `supervisor-config`
+- `logs/` (every run): the daemon socket log and each worker's `stderr.log`
+- `session-leases/` (every run): session lease files, empty after a clean stop
+- `rlm-ledger/` (runs that spawn a child; 15 of 71): one `<hash>.jsonl` per ledger
+
+Also seen, but written by the test itself and not by Prime: `models.json` (N0's redirect to the fake server), `skills/`, `prompts/` and the context files. Prime also writes two catalog caches when its GitHub fetch succeeds (B below): `models/provider-model-catalog.v1.json` and `mcp-service-catalog.v2.json`. The host's own Prime dir has both. Under item 11 they would be moved like any other entry, and Prime fetches them again at the next start.
+
+**B. The catalogs fetched from GitHub** (e28, e29; read-only GETs of the public files on 2026-10-25, then offline tests).
+- `models/catalog.v1.json` (sha256 `f0572237…7bec9d`, 1,209 models): **every entry has a `baseUrl`**, and 255 have a `compat` object. One `compat` field is `sendSessionAffinityHeaders` (Cloudflare entries). The anthropic entries all have `baseUrl: "https://api.anthropic.com"`. No entry has a header, auth or key field.
+- `plugins/catalog.v2.json` (sha256 `522afc14…5737c`, 69 entries): MCP services, each with an `https` `url`, `transport {type:"http", url}` and `auth {strategy, clientRegistration}`. No secrets.
+- **Prime caches both in the agent dir**: `<agentDir>/models/provider-model-catalog.v1.json` and `<agentDir>/mcp-service-catalog.v2.json`, each `{url, scope, fetchedAt, etag, payload}`. A daemon start reads the cache when the fetch fails: with a seeded cache, `get_model_catalog` listed the catalog's 1,209-model set, not the bundled fixtures.
+- **A catalog `baseUrl` did not redirect the anthropic provider** (e28, no `models.json`). In the cache, I changed `claude-opus-5-5`'s `baseUrl` to the fake server (`http://127.0.0.1:…`), to `https://n0-redirect.invalid` and to `https://api.anthropic.com/n0`. In all three runs, Prime **dropped that entry** from `get_model_catalog`. The turn went to the default endpoint (offline, so "Connection error."), and no request reached the fake server. A control that changed only the entry's `name` kept the entry with the new name. So for anthropic, the catalog can change model metadata (name, `reasoning`, thinking levels, limits, cost) but not the address, in these tests. Not tested: a catalog entry for a provider that has no built-in address, and a new provider name.
+- **The plugins catalog loaded nothing** (e29). With a seeded plugins cache, the session's tools (`python_repl` only) and its system prompt were the same as without it, apart from the session paths. No MCP server was started and nothing was installed.
 
 ## New facts the plan does not have
 
