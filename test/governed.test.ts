@@ -459,12 +459,14 @@ describe("G3 item 5: persistent shells end with the run (TAI-340 change 1)", () 
   });
   it("ends a shell the run started, with its whole session (timeout moves its child to another group), before the run-end checks", async () => {
     const marker = path.join(root, "late-writes");
-    const { result, report, log } = await run({ env: { FAKE_DAEMON_PERSISTENT_SHELL: `timeout 600 sh -c 'while true; do echo x >> ${marker}; sleep 0.05; done'` } });
+    const { result, report, log } = await run({ env: { FAKE_DAEMON_PROMPT_DELAY_MS: "500",
+      FAKE_DAEMON_PERSISTENT_SHELL: `timeout 600 sh -c 'while true; do echo x >> ${marker}; sleep 0.05; done'` } });
     const [rec] = fromRecords();
     expect(result.errorCode).toBeNull();
     expect(report.persistentShellsKilled).toEqual([{ shellId: `fakeshell${rec!.pid}`, sessionId: rec!.sessionId, pid: rec!.pid, when: "run_end", stopped: true }]);
     expect(members(rec!.pid)).toEqual([]);
     expect(log).toContain(`[paperclip] ended persistent shell fakeshell${rec!.pid} (pid ${rec!.pid}, session ${rec!.sessionId})`);
+    expect(existsSync(marker)).toBe(true); // the loop ran during the turn
     const size = statSync(marker).size;
     await new Promise((resolve) => setTimeout(resolve, 300));
     expect(statSync(marker).size).toBe(size);
