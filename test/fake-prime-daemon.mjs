@@ -248,6 +248,13 @@ async function handle(socket, id, command) {
           startId: `proc:${stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19]}`, command: env.FAKE_DAEMON_PERSISTENT_SHELL, sessionId: s.sessionId }));
         record({ kind: "persistent_shell", pid: shell.pid, sessionId: s.sessionId });
       }
+      // FAKE_DAEMON_LEAVE_PROCESSES: JSON list of shell commands started in their own session with this env, and no record
+      // (setsid, a double fork, a tmux job): only TAI-273 §2.2 item 13's run-end sweep ends them.
+      for (const command of JSON.parse(env.FAKE_DAEMON_LEAVE_PROCESSES ?? "[]")) {
+        const left = spawn("sh", ["-c", command], { detached: true, stdio: "ignore" });
+        left.unref();
+        record({ kind: "left_process", pid: left.pid, command });
+      }
       if (env.FAKE_DAEMON_CATALOG_REFRESH) {
         refreshed = JSON.parse(env.FAKE_DAEMON_CATALOG_REFRESH);
         for (const c of subscribers) send(c, { type: "model_catalog_changed" });

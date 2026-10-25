@@ -1,4 +1,4 @@
-// TAI-273 plan rev 9 §4.3 item 5 (F23), with Sentinel's TAI-340 change 1: persistent shells end when the run ends.
+// TAI-273 plan rev 10 §4.3 item 5 (F23, Sentinel's TAI-340 change 1): persistent shells end when the run ends.
 // bash(..., persistent=True) starts a shell that leads its own session (start_new_session=True), so no group signal of the
 // daemon or a worker reaches it. Prime records each one in <agentDir>/persistent-shells/<id>.json { id, pid, startId, sessionId }
 // (N0 item 18). The reap uses Prime's own rule: never signal a pid whose start id differs (a reused pid).
@@ -55,17 +55,15 @@ async function endShellSession(pid: number): Promise<boolean> {
  */
 export async function reapPersistentShells(agentDir: string, options: {
   when: PersistentShellKill["when"]; sessionIds: ReadonlySet<string> | null; onLog: (line: string) => Promise<void> | void;
-}): Promise<{ killed: PersistentShellKill[]; warnings: string[] }> {
+}): Promise<PersistentShellKill[]> {
   const killed: PersistentShellKill[] = [];
-  const warnings: string[] = [];
   const dir = path.join(agentDir, "persistent-shells");
   const dirStat = await fs.lstat(dir).catch(() => null);
-  if (!dirStat) return { killed, warnings };
+  if (!dirStat) return killed;
   if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
-    const text = `${dir} is ${dirStat.isSymbolicLink() ? "a symlink" : "not a directory"}; persistent shells were not reaped`;
-    warnings.push(text);
-    await options.onLog(`[paperclip] warning: ${text}\n`);
-    return { killed, warnings };
+    // Rev 10 (TAI-340): read no record, and log a warning.
+    await options.onLog("[paperclip] warning: persistent-shells is not a dir; not read\n");
+    return killed;
   }
   for (const name of (await fs.readdir(dir)).sort()) {
     if (!name.endsWith(".json")) continue;
@@ -87,5 +85,5 @@ export async function reapPersistentShells(agentDir: string, options: {
       ? `[paperclip] ended persistent shell ${shellId} (pid ${pid}, session ${sessionId ?? "unknown"})\n`
       : `[paperclip] warning: persistent shell ${shellId} (pid ${pid}) did not stop\n`);
   }
-  return { killed, warnings };
+  return killed;
 }

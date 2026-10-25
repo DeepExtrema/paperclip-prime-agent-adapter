@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AdapterExecutionContext, AdapterExecutionResult } from "@paperclipai/adapter-utils";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { execute } from "../src/server/execute.js";
 import { resolvePrimeFeatureProfile } from "../src/server/feature-profile.js";
 
@@ -478,6 +478,14 @@ describe("G3 item 5: persistent shells end with the run (TAI-340 change 1)", () 
     expect(report.persistentShellsKilled).toEqual([{ shellId: `s${pid}`, sessionId: "old-session", pid, when: "run_start", stopped: true }]);
     expect(report.agentDirDisabled).toContainEqual({ name: "persistent-shells", kind: "dir", sha256: null });
   });
+  it("ends set -m and Popen(process_group=0) children in another group of the shell's session, leader still running (rev 10)", async () => {
+    const shells = [shell("set -m; sleep 9204 & wait"), shell(`python3 -c "import subprocess; subprocess.Popen(['sleep', '9205'], process_group=0).wait()"`)];
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    for (const pid of shells) expect(members(pid).length).toBe(2); // the leader and a child in its own group
+    const { report } = await run();
+    for (const pid of shells) expect(members(pid)).toEqual([]);
+    expect(report.persistentShellsKilled.map((k: { stopped: boolean }) => k.stopped)).toEqual([true, true]);
+  });
   it("sends no signal for another startId, a gone pid, a symlinked record or a bad pid", async () => {
     const other = shell("sleep 600", { startId: "proc:1" });
     const linked = shell("sleep 600", {}, path.join(root, "elsewhere.json"));
@@ -493,8 +501,8 @@ describe("G3 item 5: persistent shells end with the run (TAI-340 change 1)", () 
     mkdirSync(agentDir(), { recursive: true });
     symlinkSync(path.join(root, "shells"), path.join(agentDir(), "persistent-shells"));
     const { report, log } = await run();
-    expect(report.warnings).toContain(`${path.join(agentDir(), "persistent-shells")} is a symlink; persistent shells were not reaped`);
-    expect(log).toContain("[paperclip] warning:");
+    expect(log).toContain("[paperclip] warning: persistent-shells is not a dir; not read");
+    expect(report.persistentShellsKilled).toEqual([]);
   });
   it("without governed-v1: ends only shells of this run's sessions, and has no run-start reap", async () => {
     const config = { featureProfile: undefined };
@@ -508,6 +516,83 @@ describe("G3 item 5: persistent shells end with the run (TAI-340 change 1)", () 
   });
 });
 
+describe("item 13: one governed run per agent dir; no marked process outlives the run", () => {
+  const started: number[] = [];
+  const procStat = (pid: number) => { try { const st = readFileSync(`/proc/${pid}/stat`, "utf8"); return st.slice(st.lastIndexOf(")") + 2).split(" "); } catch { return null; } };
+  const alive = (pid: number) => { const f = procStat(pid); return f !== null && f[0] !== "Z"; };
+  const marked = (dir: string, command = "sleep 600") => {
+    const child = spawn("sh", ["-c", command], { detached: true, stdio: "ignore", env: { ...process.env, PRIME_AGENT_CODING_AGENT_DIR: dir } });
+    child.unref();
+    started.push(child.pid!);
+    return child.pid!;
+  };
+  const left = () => records().filter((r) => r.kind === "left_process") as unknown as Array<{ pid: number }>;
+  afterEach(() => {
+    for (const pid of [...started, ...left().map((r) => r.pid)]) { try { process.kill(-pid, "SIGKILL"); } catch {} try { process.kill(pid, "SIGKILL"); } catch {} }
+    started.length = 0;
+  });
+  const bootstrap = { clearSession: false, executionRecovery: { kind: "bootstrap", providerWorkStarted: false } };
+  it("fails a second overlapping run with prime_concurrent_run, which writes and starts nothing; the first succeeds; the next starts", async () => {
+    const first = run({ env: { FAKE_DAEMON_PROMPT_DELAY_MS: "800" } });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const second = await run({ runId: "run-2" });
+    expect(second.result).toMatchObject({ errorCode: "prime_concurrent_run", ...bootstrap });
+    expect(second.result.sessionParams).toBeUndefined();
+    expect(second.log).toBe(`[paperclip] another run of this agent is in progress (${agentDir()}); not starting. Set runtimeConfig.heartbeat.maxConcurrentRuns to 1.\n`);
+    expect(existsSync(path.join(agentDir(), ".paperclip-disabled", "run-2"))).toBe(false);
+    expect((await first).result.errorCode).toBeNull();
+    expect(records().filter((r) => r.kind === "start")).toHaveLength(1);
+    expect((await run({ runId: "run-3" })).result.errorCode).toBeNull();
+  });
+  it("releases the guard after a failed run, and the guard holds across two copies of the module", async () => {
+    expect((await run({ env: { FAKE_DAEMON_SNAPSHOT_FAILS: "1" } })).result.errorCode).toBe("prime_skill_list_invalid");
+    expect((await run({ runId: "run-2" })).result.errorCode).toBeNull();
+    const a = await import("../src/server/governed-guard.js");
+    vi.resetModules();
+    const b = await import("../src/server/governed-guard.js");
+    expect(a).not.toBe(b);
+    expect(a.acquireGovernedRun("/x/agent")).toBe(true);
+    expect(b.acquireGovernedRun("/x/agent")).toBe(false);
+    b.releaseGovernedRun("/x/agent");
+    expect(a.acquireGovernedRun("/x/agent")).toBe(true);
+    a.releaseGovernedRun("/x/agent");
+  });
+  it("fails with prime_leftover_processes before auth.json is written when a process carries this agent's marker; another agent's marker passes", async () => {
+    const pid = marked(agentDir());
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const { result, log } = await run();
+    expect(result).toMatchObject({ errorCode: "prime_leftover_processes", ...bootstrap });
+    expect(result.errorMessage).toContain(`pid ${pid} (session ${pid}): sleep 600`);
+    expect(log).toContain(`End them with: kill -9 ${pid}`);
+    expect(existsSync(path.join(agentDir(), "auth.json"))).toBe(false);
+    expect(records()).toEqual([]);
+    process.kill(pid, "SIGKILL");
+    marked(path.join(root, "agents", "agent-2", "prime-agent-home"));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect((await run({ runId: "run-2" })).result.errorCode).toBeNull();
+  });
+  it("sweeps a setsid job and a double fork at run end, with warnings; another agent's process and an env -i process stay", async () => {
+    const theirs = marked(path.join(root, "agents", "agent-2", "prime-agent-home"));
+    const { result, report, log } = await run({ env: { FAKE_DAEMON_LEAVE_PROCESSES: JSON.stringify(["setsid sleep 9206", "(sleep 9207 &)", "env -i sleep 9208"]) } });
+    expect(result.errorCode).toBeNull();
+    const commands = report.processesSwept.map((p: { command: string }) => p.command).sort();
+    expect(commands).toEqual(expect.arrayContaining(["sleep 9206", "sleep 9207"]));
+    expect(commands.some((c: string) => c.includes("9208"))).toBe(false);
+    expect(report.processesSwept.every((p: { stopped: boolean }) => p.stopped)).toBe(true);
+    for (const p of report.processesSwept) expect(alive(p.pid)).toBe(false);
+    expect(report.warnings).toContain(`ended leftover process ${report.processesSwept[0].pid} (${report.processesSwept[0].command})`);
+    expect(log).toContain(`[paperclip] warning: ended leftover process ${report.processesSwept[0].pid}`);
+    expect(alive(theirs)).toBe(true);
+    const envI = readdirSync("/proc").filter((n) => /^\d+$/.test(n)).map(Number)
+      .filter((p) => { try { return readFileSync(`/proc/${p}/cmdline`, "utf8").startsWith("sleep\u00009208"); } catch { return false; } });
+    expect(envI.length).toBe(1); // the named residual
+    for (const p of envI) process.kill(p, "SIGKILL");
+  });
+  it("finds nothing to sweep in a normal run", async () => {
+    expect((await run()).report.processesSwept).toEqual([]);
+  });
+});
+
 describe("result shape", () => {
   it("adds featureProfile only under governed-v1", async () => {
     const plain = await run({ config: { featureProfile: undefined } });
@@ -515,7 +600,7 @@ describe("result shape", () => {
     const governed: AdapterExecutionResult = (await run({ runId: "run-2" })).result;
     expect(Object.keys((governed.resultJson as { featureProfile: object }).featureProfile).sort()).toEqual([
       "agentDirDisabled", "agentSkills", "agentSkillsDisabled", "cachesCleared", "contextFilesCreated", "contextFilesDisabled", "foreignGoals",
-      "harnessBytes", "harnessEntriesDisabled", "harnessFingerprint", "maxSubagentsPerRun", "modelCatalog", "persistentShellsKilled", "profile", "projectConfigCreated",
+      "harnessBytes", "harnessEntriesDisabled", "harnessFingerprint", "maxSubagentsPerRun", "modelCatalog", "persistentShellsKilled", "processesSwept", "profile", "projectConfigCreated",
       "projectConfigDisabled", "refinementEvents", "scheduledJobsCreated", "scheduledJobsDisabled", "sessionSkillChecks", "sessions", "sessionsEnded",
       "settingsKeysRemoved", "skillDiscovery", "warnings", "workspaceContextFiles",
     ]);

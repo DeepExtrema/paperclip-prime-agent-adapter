@@ -435,5 +435,9 @@ export const PRIME_RESULT_ERROR_CODES = [
   "prime_skill_list_invalid",
   /** TAI-273 §2.2 item 12: the model-catalog check or the parent's thinking level failed. Before the first prompt: no session fields, no clearSession. */
   "prime_model_catalog_invalid",
+  /** TAI-273 §2.2 item 13: a second governed run for one agent dir. providerWorkStarted false, no session fields, no clearSession. */
+  "prime_concurrent_run",
+  /** TAI-273 §2.2 item 13: a process from an earlier run still carries the agent's marker. Same result shape. */
+  "prime_leftover_processes",
 ] as const;
 export type PrimeResultErrorCode = (typeof PRIME_RESULT_ERROR_CODES)[number];

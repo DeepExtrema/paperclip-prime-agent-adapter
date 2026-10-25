@@ -6,6 +6,7 @@ import path from "node:path";
 import type { PrimeFeatureProfile } from "./feature-profile.js";
 import type { PrimeModelCatalogRecord } from "./model-catalog.js";
 import { reapPersistentShells, type PersistentShellKill } from "./persistent-shells.js";
+import type { ProcessSwept } from "./governed-guard.js";
 import { PRIME_WORKSPACE_SETTINGS } from "./skill-list.js";
 
 const CONTEXT_FILES = ["AGENTS.md", "SYSTEM.md", "APPEND_SYSTEM.md"] as const;
@@ -54,6 +55,8 @@ export interface GovernedRunState {
   cachesCleared: Array<{ name: string; sha256: Sha }>;
   /** G3 item 5: shells ended at run start, then at run end (execute.ts). */
   persistentShellsKilled: PersistentShellKill[];
+  /** Item 13: processes the run-end sweep ended (execute.ts). */
+  processesSwept: ProcessSwept[];
   /** Warnings found at run start (moves of entries an earlier run left). */
   startWarnings: string[];
   live: GovernedRunLive;
@@ -85,6 +88,7 @@ export interface GovernedReport {
   cachesCleared: Array<{ name: string; sha256: Sha }>;
   modelCatalog: PrimeModelCatalogRecord | null;
   persistentShellsKilled: PersistentShellKill[];
+  processesSwept: ProcessSwept[];
   warnings: string[];
 }
 
@@ -367,7 +371,7 @@ export async function startGovernedRun(input: {
   const state: GovernedRunState = {
     profile, agentDir, cwd, runId, disabledDir, agentSkillsDisabled: [], agentDirDisabled: [], contextFilesDisabled: [], projectConfigDisabled: [],
     scheduledJobsDisabled: 0, harnessEntriesDisabled: [], harnessBefore: null, refinementEventsBefore: 0, contextFilesBefore: new Map(),
-    cachesCleared: [], persistentShellsKilled: [], startWarnings: [],
+    cachesCleared: [], persistentShellsKilled: [], processesSwept: [], startWarnings: [],
     live: { sessions: 0, sessionsEnded: [], sessionSkillChecks: 0, foreignGoals: [], skillDiscovery: "on", contextFiles: [], warnings: [], modelCatalog: null },
   };
   // Item 4: saved Prime schedules.
@@ -413,8 +417,7 @@ export async function startGovernedRun(input: {
   }
   // G3 item 5: shells left by a crash end before item 11 moves persistent-shells/ (the reap reads those records).
   const reaped = await reapPersistentShells(agentDir, { when: "run_start", sessionIds: null, onLog: input.onLog ?? (() => undefined) });
-  state.persistentShellsKilled.push(...reaped.killed);
-  state.startWarnings.push(...reaped.warnings);
+  state.persistentShellsKilled.push(...reaped);
   // Item 11, last: the catalog caches and every entry off the keep-list.
   await enforceAgentDirAllowlist(state);
   state.contextFilesBefore = await findContextFiles(cwd);
@@ -489,7 +492,7 @@ export async function finishGovernedRun(state: GovernedRunState, settingsKeysRem
     harnessEntriesDisabled: state.harnessEntriesDisabled, harnessBytes: await treeBytes(path.join(agentDir, "harness")),
     harnessFingerprint: { before: state.harnessBefore, after: await sha256File(path.join(agentDir, "harness", "harness_state.json")) },
     refinementEvents: { before: state.refinementEventsBefore, after: await lineCount(path.join(agentDir, "refinement_history.jsonl")) },
-    cachesCleared: state.cachesCleared, modelCatalog: state.live.modelCatalog, persistentShellsKilled: state.persistentShellsKilled, warnings,
+    cachesCleared: state.cachesCleared, modelCatalog: state.live.modelCatalog, persistentShellsKilled: state.persistentShellsKilled, processesSwept: state.processesSwept, warnings,
   };
   return { report, workspaceFile: workspaceProblem };
 }

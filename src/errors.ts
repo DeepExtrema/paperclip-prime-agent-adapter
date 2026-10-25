@@ -82,7 +82,11 @@ export type PrimePolicyErrorCode =
   /** TAI-273 §2.2 item 10: the parent's skill list is not exactly the explicit list, or a session ended for its skills ran again. */
   | "prime_skill_list_invalid"
   /** TAI-273 §2.2 item 12: an allowed model is missing from the catalog, has another Anthropic address or no reasoning, or the thinking level did not take. */
-  | "prime_model_catalog_invalid";
+  | "prime_model_catalog_invalid"
+  /** TAI-273 §2.2 item 13: another governed run of this agent dir is in progress. */
+  | "prime_concurrent_run"
+  /** TAI-273 §2.2 item 13: a live process carries this agent's PRIME_AGENT_CODING_AGENT_DIR at run start. */
+  | "prime_leftover_processes";
 
 export class PrimePolicyError extends Error {
   readonly code: PrimePolicyErrorCode;
