@@ -121,6 +121,7 @@ async function prepareRun(ctx: AdapterExecutionContext, startedAtMs: number, nat
   const binding = resolvePrimeManagedConnection(ctx.config, { mode: configured.credential.mode, provider: configured.provider, allowedModels: policy.allowedModels });
   const profile = resolvePrimeFeatureProfile(ctx.config, {
     runtime: native.runtime, credentialMode: configured.credential.mode, allowedModels: policy.allowedModels, rlmMaxDepth: native.rlmMaxDepth,
+    thinking: configured.thinking,
   });
   if (profile) {
     policy.managed = { ...policy.managed, ...primeGovernedManagedKeys(profile) };
@@ -406,6 +407,13 @@ async function executeRun(ctx: AdapterExecutionContext, track: RunTrack): Promis
   }
   // §9 items 3-5 run on every outcome: success, failure, cancel, timeout and uncertain.
   const finished = await finishPrimeRun(result, { policy: prep.policy, settings, credential: prep.runtime.credential, agentDir: prep.runtime.agentDir.agentDir, sources });
+  // Rev 12 (2.2 item 12): a managed key that changed before the first prompt was put back; the run keeps its code.
+  const restored = (finished.resultJson as { settings?: { restoredBeforePrompt?: string[] } } | undefined)?.settings?.restoredBeforePrompt ?? [];
+  for (const key of restored) {
+    const text = `settings key ${key} changed before the first prompt; restored`;
+    governed?.live.warnings.push(text);
+    await ctx.onLog("stdout", `[paperclip] warning: ${text}\n`);
+  }
   return governed ? await reportGovernedRun(ctx, finished, governed, settings?.removedKeys ?? []) : finished;
 }
 /** TAI-273 §2.2 item 3: resultJson.featureProfile, and one `[paperclip] warning:` line per warning. */

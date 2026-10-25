@@ -20,7 +20,7 @@ const KEY = "sk-ant-api03-FIXTURE-governed-not-real";
 const sha = (text: string) => createHash("sha256").update(text).digest("hex");
 const savedEnv = { ...process.env };
 let root = "";
-type Rec = { kind: string; env?: Record<string, string>; command?: Record<string, unknown> & { type: string }; activeSessionId?: string; thinking?: string | null };
+type Rec = { kind: string; env?: Record<string, string>; command?: Record<string, unknown> & { type: string }; activeSessionId?: string; thinking?: string | null; settings?: string | null };
 const rec = () => path.join(root, "daemon.jsonl");
 const records = (): Rec[] => (existsSync(rec()) ? readFileSync(rec(), "utf8").trim().split("\n").map((l) => JSON.parse(l) as Rec) : []);
 const commands = () => records().filter((r) => r.kind === "command").map((r) => r.command!);
@@ -32,7 +32,18 @@ const agentDir = () => path.join(root, "agents", "agent-1", "prime-agent-home");
 const disabled = (...parts: string[]) => path.join(agentDir(), ".paperclip-disabled", "run-1", ...parts);
 const settings = () => JSON.parse(readFileSync(path.join(agentDir(), "settings.json"), "utf8")) as Record<string, unknown>;
 const write = (file: string, content: string) => { mkdirSync(path.dirname(file), { recursive: true }); writeFileSync(file, content); };
-const GOVERNED = { featureProfile: "governed-v1", credentialMode: "api_key", apiKeyEnvVar: "ANTHROPIC_API_KEY", allowedModels: [MODEL] };
+const GOVERNED = { featureProfile: "governed-v1", credentialMode: "api_key", apiKeyEnvVar: "ANTHROPIC_API_KEY", allowedModels: [MODEL], thinking: "high" };
+/** The fake's catalog entry for MODEL, as set_model answers it: modelCatalog.liveModel. */
+const LIVE = { provider: "anthropic", id: "claude-haiku-4-5", baseUrl: "https://api.anthropic.com", reasoning: true };
+/** Rev 11 §6: each failure of item 12's step (set_model, its answer, then get_state), with the fake's env and the reason. */
+const STEP_FAILURES: Array<[string, Record<string, string>, string]> = [
+  ["set_model answers success: false", { FAKE_DAEMON_SET_MODEL_FAIL: "1" }, "set_model failed: set_model refused"],
+  ["set_model answers another id", { FAKE_DAEMON_SET_MODEL_ENTRY: JSON.stringify({ ...LIVE, id: "claude-opus-4-7" }) }, `set_model answered "anthropic/claude-opus-4-7", not ${MODEL}`],
+  ["set_model answers another provider", { FAKE_DAEMON_SET_MODEL_ENTRY: JSON.stringify({ ...LIVE, provider: "n0probe" }) }, `set_model answered "n0probe/claude-haiku-4-5", not ${MODEL}`],
+  ["set_model answers another baseUrl", { FAKE_DAEMON_SET_MODEL_ENTRY: JSON.stringify({ ...LIVE, baseUrl: "https://elsewhere.invalid" }) }, `set_model answered ${MODEL} has baseUrl "https://elsewhere.invalid", not https://api.anthropic.com`],
+  ["set_model answers reasoning: false", { FAKE_DAEMON_SET_MODEL_ENTRY: JSON.stringify({ ...LIVE, reasoning: false }) }, `set_model answered ${MODEL} has no reasoning (thinking is high)`],
+  ["get_state then shows another level", { FAKE_DAEMON_THINKING_STUCK: "1" }, 'thinking level is "off", configured "high"'],
+];
 type Over = { config?: Record<string, unknown>; env?: Record<string, string>; sessionParams?: Record<string, unknown> | null; runId?: string; agentId?: string };
 async function run(over: Over = {}) {
   const logs: string[] = [];
@@ -66,14 +77,15 @@ afterEach(() => {
 });
 
 describe("governed-v1 config (§2.2)", () => {
-  const input = { runtime: "daemon" as const, credentialMode: "api_key", allowedModels: [MODEL], rlmMaxDepth: null };
-  it("is closed: one value, its three rules and maxSubagentsPerRun 1-8 (default 2), rlmMaxDepth default 1", () => {
+  const input = { runtime: "daemon" as const, credentialMode: "api_key", allowedModels: [MODEL], rlmMaxDepth: null, thinking: "high" as string | null };
+  it("is closed: one value, its four rules and maxSubagentsPerRun 1-8 (default 2), rlmMaxDepth default 1", () => {
     expect(resolvePrimeFeatureProfile({}, input)).toBeNull();
-    expect(resolvePrimeFeatureProfile({ featureProfile: "governed-v1" }, input)).toEqual({ profile: "governed-v1", maxSubagentsPerRun: 2, rlmMaxDepth: 1 });
-    expect(resolvePrimeFeatureProfile({ featureProfile: "governed-v1", maxSubagentsPerRun: "8" }, { ...input, rlmMaxDepth: 0 }))
-      .toEqual({ profile: "governed-v1", maxSubagentsPerRun: 8, rlmMaxDepth: 0 });
+    expect(resolvePrimeFeatureProfile({ featureProfile: "governed-v1" }, input)).toEqual({ profile: "governed-v1", maxSubagentsPerRun: 2, rlmMaxDepth: 1, thinking: "high" });
+    expect(resolvePrimeFeatureProfile({ featureProfile: "governed-v1", maxSubagentsPerRun: "8" }, { ...input, rlmMaxDepth: 0, thinking: "off" }))
+      .toEqual({ profile: "governed-v1", maxSubagentsPerRun: 8, rlmMaxDepth: 0, thinking: "off" });
     for (const [config, over] of [
       [{ maxSubagentsPerRun: 2 }, {}], [{ featureProfile: "governed-v2" }, {}], [{ featureProfile: "governed-v1" }, { allowedModels: null }],
+      [{ featureProfile: "governed-v1" }, { thinking: null }],
       [{ featureProfile: "governed-v1" }, { runtime: "print" }], [{ featureProfile: "governed-v1" }, { credentialMode: "host_auth" }],
       [{ featureProfile: "governed-v1", maxSubagentsPerRun: 0 }, {}], [{ featureProfile: "governed-v1", maxSubagentsPerRun: 9 }, {}],
       [{ featureProfile: "governed-v1", maxSubagentsPerRun: 1.5 }, {}],
@@ -81,8 +93,11 @@ describe("governed-v1 config (§2.2)", () => {
       expect(() => resolvePrimeFeatureProfile(config, { ...input, ...over } as typeof input)).toThrowError(expect.objectContaining({ code: "prime_feature_profile_invalid" }));
     }
   });
-  it("fails before any file is written", async () => {
-    const { result } = await run({ config: { credentialMode: undefined, apiKeyEnvVar: undefined } });
+  it.each([
+    ["no credentialMode", { credentialMode: undefined, apiKeyEnvVar: undefined }],
+    ["no thinking (rev 11)", { thinking: undefined }],
+  ])("fails before any file is written: %s", async (_name, config) => {
+    const { result } = await run({ config });
     expect(result).toMatchObject({ errorCode: "prime_feature_profile_invalid", executionRecovery: { kind: "bootstrap", providerWorkStarted: false } });
     expect(existsSync(path.join(root, "agents", "agent-1"))).toBe(false);
     expect(records()).toEqual([]);
@@ -96,8 +111,10 @@ describe("item 1: managed keys, env and depth", () => {
     expect(settings()).toMatchObject({
       harnessRefinements: true, autoRefine: { enabled: false }, factory: { enabled: false }, rlmMaxDepth: 1,
       retry: { provider: { waitForUsage: { enabled: false, pauseUntilReset: false } } }, agentTraces: { enabled: false }, telemetry: { enabled: false },
-      allowedModels: [MODEL], skills: ["!**"], enableBuiltinSkills: false,
+      allowedModels: [MODEL], skills: ["!**"], enableBuiltinSkills: false, defaultThinkingLevel: "high",
     });
+    // Rev 11: settings.json holds defaultThinkingLevel = thinking before the daemon starts.
+    expect(JSON.parse(records().find((r) => r.kind === "start")!.settings!)).toMatchObject({ defaultThinkingLevel: "high" });
     expect(commands().find((c) => c.type === "create")).toMatchObject({ config: { skills: BUILTINS } });
     expect(commands()).toContainEqual(expect.objectContaining({ type: "set_rlm_max_depth", maxDepth: 1 }));
     const env = records().find((r) => r.kind === "start")!.env!;
@@ -107,7 +124,7 @@ describe("item 1: managed keys, env and depth", () => {
     expect(report).toMatchObject({ profile: "governed-v1", maxSubagentsPerRun: 2, sessions: 0, sessionsEnded: [], skillDiscovery: "off", sessionSkillChecks: 0,
       settingsKeysRemoved: [], contextFilesDisabled: [], projectConfigDisabled: [], agentDirDisabled: [], foreignGoals: [],
       harnessEntriesDisabled: [], agentSkills: [], agentSkillsDisabled: [], scheduledJobsDisabled: 0, scheduledJobsCreated: 0,
-      cachesCleared: [], modelCatalog: { ok: true, checks: 1, refreshesSeen: 0, thinkingLevel: null, failure: null }, warnings: [] });
+      cachesCleared: [], modelCatalog: { ok: true, checks: 1, refreshesSeen: 0, liveModel: LIVE, thinkingLevel: "high", failure: null }, warnings: [] });
   });
   it("fails a run that changes a managed key with prime_settings_tampered and clears nothing else", async () => {
     const { result } = await run({ env: { FAKE_DAEMON_EDIT_SETTINGS: JSON.stringify({ autoRefine: { enabled: true } }) } });
@@ -388,15 +405,18 @@ describe("item 7: goals not set by Paperclip", () => {
     expect(second.result).toMatchObject({ exitCode: 0, errorCode: null, clearSession: false });
     const fresh = freshCommands().find((c) => c.type === "attach")!.activeSessionId;
     expect(requests().filter((r) => r.activeSessionId === fresh).map((r) => r.thinking)).toEqual(["high"]);
-    expect(settings()).not.toHaveProperty("defaultThinkingLevel");
-    expect(second.report.modelCatalog).toMatchObject({ ok: true, thinkingLevel: "high" });
+    expect(settings()).toMatchObject({ defaultThinkingLevel: "high" });
+    expect(second.report.modelCatalog).toMatchObject({ ok: true, liveModel: LIVE, thinkingLevel: "high" });
   });
-  it("fails before the first prompt when the fresh session's level stays off, with no clearSession (TAI-324 F3)", async () => {
-    const { second } = await resumeWithGoal("Keep polling forever", { config: { thinking: "high" }, env: { FAKE_DAEMON_GOAL_CLEAR: "ignore", FAKE_DAEMON_THINKING_STUCK: "new" } });
+  it.each(STEP_FAILURES.map(([name, env, failure]) => [name, { ...env, FAKE_DAEMON_SET_MODEL_SCOPE: "new", ...(env.FAKE_DAEMON_THINKING_STUCK ? { FAKE_DAEMON_THINKING_STUCK: "new" } : {}) }, failure] as const))(
+    "fails before the first prompt when, in the fresh session, %s, with no clearSession (TAI-324 F3)", async (_name, env, failure) => {
+    const { second } = await resumeWithGoal("Keep polling forever", { env: { FAKE_DAEMON_GOAL_CLEAR: "ignore", ...env } });
     expect(second.result).toMatchObject({ errorCode: "prime_model_catalog_invalid", clearSession: false, executionRecovery: { kind: "bootstrap", providerWorkStarted: false } });
     expect(second.result.sessionParams).toBeUndefined();
-    expect(second.report.modelCatalog).toMatchObject({ ok: false, thinkingLevel: "off", failure: 'thinking level is "off", configured "high"' });
-    expect(freshCommands().map((c) => c.type)).not.toContain("prompt_and_wait");
+    expect(second.report.modelCatalog).toMatchObject({ ok: false, failure });
+    const after = freshCommands();
+    expect(after.map((c) => c.type)).toContain("set_model");
+    expect(after.map((c) => c.type)).not.toContain("prompt_and_wait");
   });
   it("leaves a goal that matches adapterConfig.goal alone", async () => {
     const first = await run({ config: { goal: "Ship it" } });
@@ -424,11 +444,12 @@ describe("item 12: the model catalog and the parent's thinking level", () => {
     expect(report.modelCatalog).toMatchObject({ ok: true, refreshesSeen: 0, thinkingLevel: "high", failure: null });
     expect(report.modelCatalog.checks).toBeGreaterThan(1);
     expect(requests().map((r) => r.thinking)).toEqual(["high"]);
-    // Under governed-v1 no set_thinking_level is sent at all, so no defaultThinkingLevel is written; set_model restores create's level.
-    expect(types()).not.toContain("set_thinking_level");
+    // The first set_thinking_level (after create, which the stale session ignores) stays; none is sent after the catalog check.
+    expect(types().slice(types().indexOf("get_model_catalog"))).not.toContain("set_thinking_level");
     expect(types().lastIndexOf("get_model_catalog")).toBeLessThan(types().indexOf("set_model"));
-    expect(settings()).not.toHaveProperty("defaultThinkingLevel");
-    expect(settings()).toMatchObject({ defaultProvider: "anthropic", defaultModel: "claude-haiku-4-5", recentModels: [MODEL] });
+    expect(report.modelCatalog.liveModel).toEqual(LIVE);
+    // settings.json after the run equals the managed keys plus recentModels (rev 11).
+    expect(settings()).toEqual({ ...JSON.parse(records().find((r) => r.kind === "start")!.settings!), recentModels: [MODEL] });
     expect(report.settingsKeysRemoved).toEqual([]);
   });
   it("models 0.10.1: set_thinking_level alone after the catalog shows the level in get_state, sends no thinking and writes defaultThinkingLevel", async () => {
@@ -479,21 +500,30 @@ describe("item 12: the model catalog and the parent's thinking level", () => {
     const { result } = await run({ env: { FAKE_DAEMON_CATALOG: JSON.stringify([entry(), entry({ id: "n0-probe", baseUrl: "http://127.0.0.1:9" })]) } });
     expect(result.errorCode).toBeNull();
   });
-  it("fails before the first prompt when the level stays off after set_model, and sends no set_thinking_level", async () => {
-    const { result, report } = await run({ config: { thinking: "high" }, env: { FAKE_DAEMON_THINKING_STUCK: "1" } });
+  it.each(STEP_FAILURES)("fails before the first prompt when %s, with no clearSession (rev 11)", async (_name, env, failure) => {
+    const { result, report, log } = await run({ env });
     expect(result).toMatchObject(bootstrap);
     expect(result.sessionParams).toBeUndefined();
-    expect(report.modelCatalog).toMatchObject({ ok: false, thinkingLevel: "off", failure: 'thinking level is "off", configured "high"' });
+    expect(report.modelCatalog).toMatchObject({ ok: false, failure });
+    expect(log).toContain(`[paperclip] Prime model catalog check failed: ${failure}`);
     expect(types()).not.toContain("prompt_and_wait");
-    expect(types()).not.toContain("set_thinking_level");
+    expect(types().slice(types().indexOf("get_model_catalog"))).not.toContain("set_thinking_level");
   });
-  it("fails when set_model answers an entry at another address or with no reasoning", async () => {
-    const moved = await run({ config: { thinking: "high" }, env: { FAKE_DAEMON_SET_MODEL_ENTRY: JSON.stringify(entry({ baseUrl: "https://elsewhere.invalid" })) } });
-    expect(moved.result).toMatchObject(bootstrap);
-    expect(moved.report.modelCatalog.failure).toBe(`set_model answered ${MODEL} has baseUrl "https://elsewhere.invalid", not https://api.anthropic.com`);
-    const flat = await run({ runId: "run-2", config: { thinking: "high" }, env: { FAKE_DAEMON_SET_MODEL_ENTRY: JSON.stringify(entry({ reasoning: false })) } });
-    expect(flat.report.modelCatalog.failure).toBe(`set_model answered ${MODEL} has no reasoning (thinking is high)`);
-    expect(types()).not.toContain("prompt_and_wait");
+  it("keeps prime_model_catalog_invalid when set_model clamps the level, puts the managed defaultThinkingLevel back and names it (rev 12)", async () => {
+    const { result, report, log } = await run({ env: { FAKE_DAEMON_SET_MODEL_CLAMP: "medium" } });
+    expect(result).toMatchObject(bootstrap);
+    expect(result.errorMeta?.policyFailures).toBeUndefined();
+    expect(report.modelCatalog).toMatchObject({ ok: false, thinkingLevel: "medium", failure: 'thinking level is "medium", configured "high"' });
+    expect(settings()).toMatchObject({ defaultThinkingLevel: "high" });
+    expect((result.resultJson as { settings: { restoredBeforePrompt: string[] } }).settings.restoredBeforePrompt).toEqual(["defaultThinkingLevel"]);
+    expect(log).toContain("[paperclip] warning: settings key defaultThinkingLevel changed before the first prompt; restored");
+    expect(report.warnings).toContain("settings key defaultThinkingLevel changed before the first prompt; restored");
+  });
+  it("sends no set_model without governed-v1 when create already shows the configured model (as on 1f8f816)", async () => {
+    const { result } = await run({ config: { featureProfile: undefined } });
+    expect(result.errorCode).toBeNull();
+    expect(types()).toContain("create");
+    expect(types()).not.toContain("set_model");
   });
   it("re-checks after model_catalog_changed during the run, and fails the run with no clearSession", async () => {
     const { result, report, log } = await run({ env: { FAKE_DAEMON_PROMPT_DELAY_MS: "800",

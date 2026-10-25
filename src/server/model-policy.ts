@@ -177,6 +177,8 @@ export interface PrimeSettingsCheck {
   removedKeys?: string[];
   /** Item 5: the removed keys on the dangerous list. Any one fails the run with prime_settings_tampered. */
   dangerousKeys?: string[];
+  /** Rev 12 (2.2 item 12): managed keys that changed in a run that failed before its first prompt; put back, and no failure. */
+  restoredBeforePrompt?: string[];
 }
 
 const isAllowedKey = (managed: Record<string, unknown>, key: string) =>
@@ -195,6 +197,12 @@ export async function checkPrimeSettings(state: PrimeSettingsState): Promise<Pri
   if (removedKeys.length > 0) await writePrivateJson(state.file, allowedOnly(after!, state.managed));
   const dangerousKeys = removedKeys.filter((key) => (PRIME_DANGEROUS_SETTINGS_KEYS as readonly string[]).includes(key));
   return { ...check, removedKeys, dangerousKeys };
+}
+
+/** Rev 12 (2.2 item 12): puts the managed values back over whatever the run left, keeping the other allowed keys. */
+async function restorePrimeManagedKeys(state: PrimeSettingsState): Promise<void> {
+  const current = (await readSettings(state.file)).value ?? {};
+  await writePrivateJson(state.file, { ...(state.removedKeys === undefined ? current : allowedOnly(current, state.managed)), ...state.managed });
 }
 
 // Item 4: auth.json
@@ -427,7 +435,13 @@ export async function finishPrimeRun(result: AdapterExecutionResult, input: {
   const resultJson = { ...(result.resultJson ?? {}), modelAudit, ...(settingsCheck ? { settings: settingsCheck } : {}), ...(authCheck ? { authCheck } : {}) };
   if (!enforced) return { ...result, resultJson };
   const failures: Array<{ code: PrimePolicyErrorCode; message: string }> = [];
-  if (settingsCheck && settingsCheck.tamperedKeys.length > 0) {
+  // Rev 12 (2.2 item 12, G3 item 3): before the first prompt no model turn ran, so a run that failed then keeps its own code and
+  // gets no clearSession; a changed managed key (such as defaultThinkingLevel after set_model clamped the level) is put back.
+  const beforePrompt = result.executionRecovery?.kind === "bootstrap" && result.executionRecovery.providerWorkStarted === false;
+  if (settings && settingsCheck && settingsCheck.tamperedKeys.length > 0 && beforePrompt
+    && await restorePrimeManagedKeys(settings).then(() => true, () => false)) {
+    settingsCheck.restoredBeforePrompt = [...settingsCheck.tamperedKeys];
+  } else if (settingsCheck && settingsCheck.tamperedKeys.length > 0) {
     failures.push({ code: "prime_settings_tampered", message: `settings.json managed keys changed during the run: ${settingsCheck.tamperedKeys.join(", ")}.` });
   }
   if (settingsCheck?.dangerousKeys && settingsCheck.dangerousKeys.length > 0) {

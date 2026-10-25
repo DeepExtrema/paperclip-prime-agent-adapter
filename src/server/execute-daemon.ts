@@ -616,9 +616,8 @@ async function runAttempt(
       };
       if (summary.provider !== runtime.provider || summary.model !== runtime.model)
         await must({type : "set_model", provider : runtime.provider, modelId : runtime.model});
-      // Under governed-v1, item 12's set_model restores create's level instead. A set_thinking_level that lands after the catalog
-      // on a stale session would change the level and write defaultThinkingLevel, a dangerous settings key (TAI-324 F1).
-      if (runtime.thinking !== null && summary.thinkingLevel !== runtime.thinking && !governed)
+      // Under governed-v1 this write is harmless: defaultThinkingLevel is a managed key with this value (rev 11, item 1).
+      if (runtime.thinking !== null && summary.thinkingLevel !== runtime.thinking)
         await must({type : "set_thinking_level", level : runtime.thinking});
       if (native.rlmMaxDepth !== null) await must({type : "set_rlm_max_depth", maxDepth : native.rlmMaxDepth});
     };
@@ -669,7 +668,7 @@ async function runAttempt(
       return await outcome("skill_list_failed", parentProblem, { session: null });
     }
     if (governed) {
-      catalog = governed.live.modelCatalog = { ok: false, checks: 0, refreshesSeen: 0, thinkingLevel: null, failure: null };
+      catalog = governed.live.modelCatalog = { ok: false, checks: 0, refreshesSeen: 0, liveModel: null, thinkingLevel: null, failure: null };
       const problem = await waitForPrimeCatalog(client, session.activeSessionId, allowedModels, runtime.thinking, catalog)
         ?? await confirmThinking(session);
       if (problem) return await outcome("catalog_failed", catalogFailed(problem), { session: null });

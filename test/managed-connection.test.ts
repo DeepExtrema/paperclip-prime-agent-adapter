@@ -31,7 +31,7 @@ const records = (): Rec[] => (existsSync(rec()) ? readFileSync(rec(), "utf8").tr
 const agentDir = () => path.join(root, "agents", "agent-1", "prime-agent-home");
 const authFile = () => path.join(agentDir(), "auth.json");
 const MANAGED = {
-  credentialMode: "managed_subscription", featureProfile: "governed-v1", allowedModels: [MODEL], managedAiConnection: BINDING,
+  credentialMode: "managed_subscription", featureProfile: "governed-v1", allowedModels: [MODEL], managedAiConnection: BINDING, thinking: "high",
 };
 type Over = { config?: Record<string, unknown>; env?: Record<string, string> };
 async function run(over: Over = {}) {

@@ -22,7 +22,8 @@ if (argv[0] !== "--mode" || argv[1] !== "daemon" || !socketPath) {
   process.stderr.write(`fake-prime-daemon: unsupported argv ${JSON.stringify(argv)}\n`);
   process.exit(64);
 }
-record({ kind: "start", argv, cwd: process.cwd(), env });
+const settingsFile = env.PRIME_AGENT_CODING_AGENT_DIR ? path.join(env.PRIME_AGENT_CODING_AGENT_DIR, "settings.json") : null;
+record({ kind: "start", argv, cwd: process.cwd(), env, settings: settingsFile && existsSync(settingsFile) ? readFileSync(settingsFile, "utf8") : null });
 let workerPid = process.pid;
 if (env.FAKE_DAEMON_WORKER) {
   const worker = spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"], { detached: true, stdio: "ignore" });
@@ -56,6 +57,9 @@ const send = (socket, message) => { if (!socket.destroyed) socket.write(`${JSON.
 // session created without sessionPath).
 // Settings writes, as 0.10.1 makes them: set_thinking_level that changes the level writes defaultThinkingLevel; set_model writes
 // defaultProvider, defaultModel and recentModels. Each prompt is recorded as {kind: "request", thinking}.
+// set_model faults: FAKE_DAEMON_SET_MODEL_FAIL=1 answers success false; FAKE_DAEMON_SET_MODEL_ENTRY (JSON) is its answer instead
+// of the catalog entry; FAKE_DAEMON_SET_MODEL_CLAMP=<level> sets that level and writes it as defaultThinkingLevel (0.7.1's clamp).
+// FAKE_DAEMON_SET_MODEL_SCOPE=new limits them to a session created without sessionPath (item 7's fresh session).
 const startedAt = Date.now();
 const DEFAULT_CATALOG = ["claude-haiku-4-5", "claude-opus-4-7", "claude-opus-5-5"].map((id) => ({ provider: "anthropic", id, baseUrl: "https://api.anthropic.com", reasoning: true }));
 let refreshed = null;
@@ -118,7 +122,7 @@ function create(command, depth = 0) {
   const initial = JSON.parse(env.FAKE_DAEMON_INITIAL_STATS ?? '{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0,"cost":0}');
   const s = { id: `a${process.pid.toString(16)}${++nextSession}`.slice(0, 12), sessionId, sessionFile, cwd: config.cwd, config,
     provider: env.FAKE_DAEMON_MODEL_PROVIDER ?? config.provider ?? "anthropic", model: env.FAKE_DAEMON_MODEL_ID ?? config.model ?? "claude-opus-4-7",
-    stale, stuck, thinking: stale || stuck ? "off" : config.thinking ?? "medium", streaming: env.FAKE_DAEMON_STREAMING_AT_START === "1", prompted: false, messages: 0, seq: 0,
+    fresh: !sessionPath, stale, stuck, thinking: stale || stuck ? "off" : config.thinking ?? "medium", streaming: env.FAKE_DAEMON_STREAMING_AT_START === "1", prompted: false, messages: 0, seq: 0,
     stats: initial, last: null, clients: new Set(), pending: null, rlmMaxDepth: 2 };
   // A resumed parent's old sessions, from its ledger (N0 item 4): roster_subscribe lists each depth >= 1 one as an inactive
   // item with no activeSessionId, whose id is its sessionId (TAI-324 F2, Nexus n01); `list` does not list them.
@@ -243,12 +247,17 @@ async function handle(socket, id, command) {
     case "get_state": return ok({ thinkingLevel: s.thinking, model: { provider: s.provider, id: s.model } });
     case "get_model_catalog": return ok({ models: catalogModels() });
     case "set_model": {
+      const faulty = env.FAKE_DAEMON_SET_MODEL_SCOPE !== "new" || s.fresh;
+      if (faulty && env.FAKE_DAEMON_SET_MODEL_FAIL === "1") return fail("set_model refused");
       s.provider = command.provider; s.model = command.modelId;
       if (catalogReady() && !s.stuck) { s.stale = false; s.thinking = s.config.thinking ?? s.thinking; }
       mergeJson(path.join(s.config.agentDir, "settings.json"), { defaultProvider: s.provider, defaultModel: s.model, recentModels: [`${s.provider}/${s.model}`] });
-      // The answer is the model's catalog entry (FAKE_DAEMON_SET_MODEL_ENTRY: JSON entry instead).
+      if (faulty && env.FAKE_DAEMON_SET_MODEL_CLAMP && s.thinking !== env.FAKE_DAEMON_SET_MODEL_CLAMP) {
+        s.thinking = env.FAKE_DAEMON_SET_MODEL_CLAMP;
+        mergeJson(path.join(s.config.agentDir, "settings.json"), { defaultThinkingLevel: s.thinking });
+      }
       const entry = catalogModels().find((m) => m.provider === s.provider && m.id === s.model) ?? { provider: s.provider, id: s.model };
-      return ok(env.FAKE_DAEMON_SET_MODEL_ENTRY ? JSON.parse(env.FAKE_DAEMON_SET_MODEL_ENTRY) : entry);
+      return ok(faulty && env.FAKE_DAEMON_SET_MODEL_ENTRY ? JSON.parse(env.FAKE_DAEMON_SET_MODEL_ENTRY) : entry);
     }
     case "set_rlm_max_depth": s.rlmMaxDepth = command.maxDepth; return ok({ maxDepth: command.maxDepth, source: "chat", globalSaved: false });
     case "get_session_stats": {
