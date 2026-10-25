@@ -24,6 +24,33 @@ A long-lived Claude subscription token from `claude setup-token` (prefix `sk-ant
 
 With `allowedModels` set, the adapter also checks `auth.json` after every run: it must still be a regular 0600 file owned by the server user whose only key is the configured provider (`prime_auth_tampered`). Only key names are read into the result.
 
+## managed_subscription
+
+Set `"credentialMode": "managed_subscription"` to run on the host's managed Claude subscription connection (the agent's Paperclip AI connection to Anthropic). At module load the adapter adds `prime_agent_local` to the host's list of adapters that may use an Anthropic subscription. The environment test reports `prime_auth_managed_registered` or `prime_auth_managed_unregistered`.
+
+Before any file is written, the run fails with `prime_managed_connection_invalid` and `providerWorkStarted: false` unless all of these hold:
+- `featureProfile` is `"governed-v1"` ([configuration](configuration.md#feature-profile-governed-v1)), so every run that holds the shared token also gets the agent-dir allowlist
+- the host's binding `managedAiConnection` is `provider: "anthropic"`, `method: "subscription"`, with an `identity`
+- `env.CLAUDE_CODE_OAUTH_TOKEN` (set by the host) starts with `sk-ant-oat`, and the first 16 hex characters of its sha256 equal the last `:` segment of the identity
+- `model` is an `anthropic/…` model, and `allowedModels` is set
+
+The rule is closed in the other direction too: a config with a Paperclip AI connection and any other `credentialMode` fails the same way.
+
+Each run writes `{"anthropic": {"type": "api_key", "key": <token>}}` to `auth.json` (0600, temp file and rename). In a `finally` that covers every outcome, the adapter checks the file (`prime_auth_tampered`), then **deletes it** (`prime_auth_cleanup_failed` if it cannot). `resultJson.credential` holds `{ mode, connectionId, identitySuffix }`, and the suffix is a hash prefix, not a secret. Billing is `subscription`, with no `costUsd`.
+
+The environment test runs the binding and token checks when the test body carries the token (`prime_auth_managed_token_ok`). It sends no model request, so the first live check that Anthropic accepts the token is the first run.
+
+One Claude login backs every agent on this mode: a restriction or revocation stops all of them, and the owner's own Claude Code too.
+
+### Child environment
+
+- In every mode, `CLAUDE_CODE_OAUTH_TOKEN` is removed from Prime's environment.
+- In `managed_subscription` mode, and in `api_key` mode under `governed-v1`, every `ANTHROPIC_*` key is removed too. Without the profile, `api_key` mode removes only its own variable.
+
+### Error codes
+
+Every credential and provider-auth failure uses a `prime_*` code: `prime_managed_connection_invalid`, `prime_auth_tampered`, `prime_auth_cleanup_failed`, and `prime_provider_auth_failed` for a 401 or 403 from Anthropic. A quota hit is `prime_provider_quota`. None of them matches the host's own auth-failure codes, so the host does not mark the shared connection as failed. A `prime_provider_auth_failed` or `prime_provider_quota` run keeps its session.
+
 ## Never
 
 No fallback to the operator's `~/.prime/agent` as agent dir, to another provider or to another model. No key in logs, run results, session params or notes. A missing or unsafe credential fails before Prime starts: `prime_host_auth_missing`, `prime_host_auth_unsafe`, `prime_api_key_missing`, `prime_auth_file_unsafe`.
@@ -38,4 +65,4 @@ Observed on 2026-10-18 (prime-agent 0.10.0): two concurrent runs on one symlinke
 
 ## Security
 
-With `host_auth` every agent can read the host token through its link. Use `api_key` with a separate key per agent when that matters.
+With `host_auth` every agent can read the host token through its link. Use `api_key` with a separate key per agent when that matters. With `managed_subscription`, the agent's own code can read the token from `auth.json` during its run: there is no sandbox.

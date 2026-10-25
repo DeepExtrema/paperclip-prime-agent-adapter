@@ -19,12 +19,14 @@ All fields live in the agent's `adapterConfig`.
 | `graceSec` | number ≥ 0 | `20` | `graceSec` |
 | `extraArgs` (else `args`) | string[] | `[]` | `extraArgs` |
 | `env` | object | `{}` | `env` (string values only) |
-| `credentialMode` | `"host_auth"` \| `"api_key"` | `"host_auth"` | `credential.mode` |
+| `credentialMode` | `"host_auth"` \| `"api_key"` \| `"managed_subscription"` | `"host_auth"` | `credential.mode`; `managed_subscription` needs `featureProfile: "governed-v1"` ([credentials](credentials.md#managed_subscription)) |
 | `apiKeyEnvVar` | env var name | required when `api_key` | `credential.apiKeyEnvVar` |
 | `hostAuthFile` | absolute path | `<os.homedir()>/.prime/agent/auth.json` | `credential.hostAuthFile` |
 | `agentDirRoot` | absolute path | `<instanceRoot>/companies/<companyId>/agents` | §3 layout root |
 | `allowedModels` | `provider/modelId` list (or one per line) | unset | [model allowlist](#model-allowlist) |
 | `modelRoles` | object, role → `provider/modelId` | every role = `model` | [model allowlist](#model-allowlist); needs `allowedModels` |
+| `featureProfile` | `"governed-v1"` | unset | [feature profile](#feature-profile-governed-v1); needs `allowedModels`, `runtime: "daemon"` and `credentialMode` `managed_subscription` or `api_key` |
+| `maxSubagentsPerRun` | integer 1-8 | `2` under `governed-v1` | sessions per run other than the parent; only with `featureProfile` |
 
 Empty strings count as unset. The Paperclip UI writes the thinking level as `thinkingEffort` (create form) or `effort` (edit form). Precedence: `thinking`, then `effort`, then `thinkingEffort` (INTERFACES §16 A21). The first key that is present wins, and an empty value means Prime's own default (no `--thinking`).
 
@@ -46,7 +48,7 @@ After every run, whatever the outcome (success, failure, cancel, timeout, uncert
 
 - **Settings:** a managed key that differs from what was written fails the run with `prime_settings_tampered`. `resultJson.settings` has `sha256After` and `tamperedKeys`.
 - **Auth (`api_key`):** `auth.json` must be a regular 0600 file whose only key is the configured provider, else `prime_auth_tampered`. See [credentials](credentials.md#api_key).
-- **Model audit:** the adapter reads Prime's own session files: the parent session, every child the daemon reported (`rlm_child_update`, `list` rows with `rlmDepth > 0`, `get_session_stats`), and every `*.jsonl` under `<agentDir>/sessions/` that changed during the run. Only the lines added during this run are read. Each assistant turn's `provider/model` goes into `resultJson.modelAudit = { ok, enforced, actors: [{ sessionId, activeSessionId, depth, file, models, turns, turnsWithoutModel, tokens }], forbidden, unreadable, absent }`. The run fails with `prime_model_audit_failed` when a turn's model is outside `allowedModels`, a reported child or the parent has no readable session file (a missing file passes, listed in `absent`, only when no prompt was sent or the daemon's stats show 0 tokens for it), a turn has no `provider` or `model`, an actor's file has no turns while the daemon's stats show tokens for it, or a line is not JSON. The usage row keeps `model` only when the audit is `ok`; otherwise it shows the forbidden model, or `unverified`.
+- **Model audit:** the adapter reads Prime's own session files: the parent session, every other session the daemon reported at any depth (`rlm_child_update`, `list` rows, including depth-0 `rlm.create_session` sessions, `get_session_stats`), and every `*.jsonl` under `<agentDir>/sessions/` that changed during the run. Only the lines added during this run are read. Each assistant turn's `provider/model` goes into `resultJson.modelAudit = { ok, enforced, actors: [{ sessionId, activeSessionId, depth, file, models, turns, turnsWithoutModel, tokens }], forbidden, unreadable, absent }`. The run fails with `prime_model_audit_failed` when a turn's model is outside `allowedModels`, a reported child or the parent has no readable session file (a missing file passes, listed in `absent`, only when no prompt was sent or the daemon's stats show 0 tokens for it), a turn has no `provider` or `model`, an actor's file has no turns while the daemon's stats show tokens for it, or a line is not JSON. The usage row keeps `model` only when the audit is `ok`; otherwise it shows the forbidden model, or `unverified`.
 
 A policy failure replaces the run's own code, which moves to `errorMeta.runErrorCode`, and the session is not saved. `recentModels` is Prime's own history and is not managed. Nested settings objects (`compaction`, `branchSummary`, `autoRefine`, `retry`) are not known to hold a model in 0.10.1 (`unverified`); if one does, the audit still catches the turn after the run, but nothing blocks it during the run. Prime's project-level settings file in the working directory is not read or checked by the adapter.
 
@@ -54,13 +56,15 @@ A policy failure replaces the run's own code, which moves to `errorMeta.runError
 
 Levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. `timeoutSec` 0 means none. The budget starts at the start of `execute`, before the Prime dir is prepared. `graceSec` 20 is the SIGTERM grace. These are the same defaults as `pi_local`.
 
+**Daemon mode without `governed-v1` may run the parent with thinking off.** Prime 0.10.1 fetches its model catalog from GitHub at daemon start. A session created before that fetch lands keeps `thinkingLevel: "off"`, and the adapter's `set_thinking_level` right after `create` succeeds but changes nothing (TAI-339, offline). Under `governed-v1` the adapter waits for the catalog and sets the level again ([item 12](#feature-profile-governed-v1)). Whether live runs without the profile hit this is `unverified`.
+
 ## Working directory
 
 Paperclip's project/issue workspace cwd wins. With the default agent-home workspace, a configured `cwd` wins. Otherwise the server's cwd is used. Execute creates a missing cwd, as `pi_local` does. The environment test only checks it (`prime_cwd_invalid`). A cwd under `~/.prime/agent`, Paperclip home entries other than `instances/<id>/workspaces` and `projects`, or the instance `secrets`, `db`, `data/backups`, `logs` dirs is refused before any mkdir (`prime_path_invalid`, INTERFACES §16 A15).
 
 ## Instructions, prompts and skills
 
-The instructions file (`instructionsFilePath`, set by the instructions bundle) and `appendSystemPrompt` become `--append-system-prompt` arguments in that order. `promptTemplate`/`bootstrapPromptTemplate` replace Paperclip's default prompt templates. Desired Paperclip skills are linked into a temporary dir and passed as one `--skill` each for that run only. They show as `configured`, never `installed`. `noContextFiles` adds `--no-context-files`. `extraArgs` go before `-- <prompt>`.
+The instructions file (`instructionsFilePath`, set by the instructions bundle) and `appendSystemPrompt` become `--append-system-prompt` arguments in that order. `promptTemplate`/`bootstrapPromptTemplate` replace Paperclip's default prompt templates. Desired Paperclip skills are linked into a temporary dir and passed as one `--skill` each for that run only. Each is staged under the `name` in its `SKILL.md` frontmatter, because Prime requires the dir name to equal it. The runtime name is kept, with one `[paperclip]` line, when that name is missing, invalid, shared by two skills, or the name of a Prime built-in (which it would replace). They show as `configured`, never `installed`. `noContextFiles` adds `--no-context-files` in print mode. With `runtime: "daemon"` it has no effect, because Prime 0.10.1 ignores it in `create`, and the run log says so. `extraArgs` go before `-- <prompt>`.
 
 ## Per-agent Prime directory
 
@@ -82,6 +86,19 @@ There is one Prime session per Paperclip task session. Saved params are `session
 
 Failed, cancelled, timed-out and uncertain runs never replace the saved session. Resuming restores the transcript, not Python state. Nothing is replayed after a crash (L7).
 
+- **A missing or unknown session file** starts one fresh session, with the log line `[paperclip] Prime session <id> is unavailable (<reason>); starting a fresh session.` The run returns the new session without `clearSession`, so the host replaces the row. Print mode does the same.
+- **A held session lease** (the session is open in another Prime process) fails the run with `prime_session_busy`, with no session fields and no `clearSession`, so the row is kept. With one daemon per run, this means a process from an earlier run is still alive.
+- **A policy failure** (`prime_model_audit_failed`, `prime_settings_tampered`, `prime_auth_tampered`) with `allowedModels` set returns `clearSession: true`, so a session that holds forbidden turns is not resumed. A `prime_settings_tampered` that comes only from the shared workspace file is the exception: it returns no `clearSession`.
+- **Auth and quota failures** (`prime_provider_auth_failed`, `prime_provider_quota`) keep the session.
+
+## Persistent shells
+
+**Persistent shells end when the run ends.** A shell from Prime's `bash(..., persistent=True)` leads its own process session, so stopping the daemon and its workers does not reach it. Prime records each one in `<agentDir>/persistent-shells/<id>.json`. After the Prime process is gone, and before any run-end check, the adapter ends each recorded shell whose pid still has the recorded start id: `SIGKILL` to its process group and to every process in its session, re-checked every 100 ms for up to 2 s. Each one gets an `[paperclip] ended persistent shell <id> (pid N, session <sessionId>)` line, or a warning if it did not stop.
+
+- Under `governed-v1`: every recorded shell, at run end and also at run start (for shells left by a crash).
+- Without it: only shells of the sessions this run used, at run end only.
+- Not covered: a process that leaves the shell's session on purpose (`setsid`), or a shell whose record the agent deleted.
+
 ## Environment
 
 The base is `sanitizeInheritedPaperclipEnv(process.env)` (INTERFACES §4 and §16 A17, A22). From the server environment, only these keys pass: `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LC_*`, `TZ`, `TERM`, `TMPDIR`, `XDG_*`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `NODE_EXTRA_CA_CERTS`, `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` (and their lowercase forms), `PAPERCLIP_RUNTIME_API_URL`, `PAPERCLIP_LISTEN_HOST`, `PAPERCLIP_LISTEN_PORT`. Everything else, provider keys included, is dropped. Inherited Paperclip server secrets such as `PAPERCLIP_AGENT_JWT_SECRET` never reach Prime. Stripped keys stay explicit `undefined` so the spawn helper cannot restore them. Set anything else Prime needs in config `env`.
@@ -92,7 +109,26 @@ Paperclip gives the agent `PAPERCLIP_AGENT_ID`, `PAPERCLIP_COMPANY_ID`, `PAPERCL
 
 ## Concurrency
 
-Paperclip does not serialize runs per agent by default: agents created through the API get `runtimeConfig.heartbeat.maxConcurrentRuns: 20`, and runs on different issues would share one Prime agent dir (`settings.json`, `harness/`). The adapter adds no lock. Set `runtimeConfig.heartbeat.maxConcurrentRuns: 1` on every `prime_agent_local` agent (recommended; the WP7 smoke does this). Different agents still run in parallel. (INTERFACES §16 A13.)
+Paperclip does not serialize runs per agent by default: agents created through the API get `runtimeConfig.heartbeat.maxConcurrentRuns: 20`, and runs on different issues would share one Prime agent dir (`settings.json`, `harness/`). The adapter adds no lock. Set `runtimeConfig.heartbeat.maxConcurrentRuns: 1` on every `prime_agent_local` agent (recommended; the WP7 smoke does this). Different agents still run in parallel. (INTERFACES §16 A13.) A `governed-v1` agent must have it: the run-start shell reap, the agent-dir moves and the `auth.json` delete assume one run at a time.
+
+## Feature profile governed-v1
+
+`featureProfile: "governed-v1"` is one closed value, not a set of switches. It needs `allowedModels`, `runtime: "daemon"` and `credentialMode` `managed_subscription` or `api_key`, never `host_auth`. Otherwise the run fails with `prime_feature_profile_invalid` before any file is written. `maxSubagentsPerRun` (1-8, default 2) is allowed only with it. Every move below goes to `<agentDir>/.paperclip-disabled/<runId>/`, and no move or write follows a symlink.
+
+The numbers are the items of TAI-273 plan section 2.2.
+
+1. **Managed settings keys**, written before each run and checked after it like the model keys: `harnessRefinements: true`, `autoRefine: {enabled: false}`, `factory: {enabled: false}`, `rlmMaxDepth` (default 1), `retry: {provider: {waitForUsage: {enabled: false, pauseUntilReset: false}}}`, `agentTraces: {enabled: false}`, `telemetry: {enabled: false}`, `skills: ["!**"]` and `enableBuiltinSkills: false`. The child env also gets `DO_NOT_TRACK=1`. A session with `isQuotaParked: true` fails the run with `prime_provider_quota`. Whether `autoRefine` and `waitForUsage` act in 0.10.1 is `unverified`.
+2. **Sessions per run.** Every Prime session other than the parent counts, at any depth, keyed by `sessionId`. One over `maxSubagentsPerRun` is ended (`cancel_rlm_child` then `delete_rlm_subagent` at depth 1 and below, `kill` at depth 0). An end that fails, or an ended session seen running again, fails the run with `prime_subagent_limit_exceeded`.
+3. **The run report**, `resultJson.featureProfile`: `profile`, `maxSubagentsPerRun`, `sessions`, `sessionsEnded` (`{ sessionId, depth, reason, skills? }`), `skillDiscovery`, `sessionSkillChecks`, `agentSkills`, `agentSkillsDisabled`, `agentDirDisabled`, `contextFilesDisabled`, `contextFilesCreated`, `projectConfigDisabled`, `projectConfigCreated`, `workspaceContextFiles`, `settingsKeysRemoved`, `foreignGoals`, `scheduledJobsDisabled`, `scheduledJobsCreated`, `harnessEntriesDisabled`, `harnessBytes`, `harnessFingerprint`, `refinementEvents`, `cachesCleared`, `modelCatalog`, `persistentShellsKilled` and `warnings`. Each warning is also one `[paperclip] warning:` line in the run log.
+4. **Saved Prime schedules** (`session-artifacts/*/scheduled-jobs.json`) are renamed at run start.
+5. **`settings.json` is an allowlist:** the managed keys and `onboardingShown`, `onboardingCompleted`, `recentModels`, `quietStartup` and `theme`. Other keys are removed at run start and run end and reported by name. A run that adds a key that runs commands, loads code, prompts or skills, or changes the model, retries or sessions (`shellPath`, `mcpServers`, `packages`, `extensions`, `compaction` and the rest of the list in `src/server/feature-profile.ts`) fails with `prime_settings_tampered`.
+6. **Context files and the workspace's Prime config.** `<agentDir>/AGENTS.md`, `SYSTEM.md` and `APPEND_SYSTEM.md` move aside. Every entry of `<cwd>/.prime/agent/` moves to `<cwd>/.prime/agent.disabled-<runId>/`, except the workspace file of item 10. `AGENTS.md` and `CLAUDE.md` in `cwd` and every parent dir are not moved: Prime loads them from every ancestor up to `/`. They are hashed before and after the run. A file in `cwd` gives a warning when it changes, and a file above `cwd` gives a warning on every run.
+7. **Goals not set by Paperclip** are cleared with `/goal clear` before the first prompt. If that fails, the session is killed and a fresh one is returned without `clearSession`.
+8. **The global harness keeps only memory.** Non-memory entries of `<agentDir>/harness/harness_state.json` are removed, and both refine stores move aside.
+9. **Agent-installed skills**: every entry under `<agentDir>/skills/` moves aside.
+10. **The skill list.** The parent gets only the staged Paperclip skills and six Prime built-ins by path (`agent-message`, `agent-observe`, `attach-image`, `compact`, `edit`, `refine`, plus `goal` when `goal` is set). The adapter keeps one file in the workspace, `<cwd>/.prime/agent/settings.json`, holding exactly `{"skills":["!**"]}`. It stays between runs, because agents can share a `cwd`, and the adapter never deletes it. Before the first prompt, Prime's own skill list for the parent must match exactly, or the run fails with `prime_skill_list_invalid`. Every other session is checked the first time the adapter sees it, and one that loaded a skill off the list is ended with a warning, while the run goes on. If the workspace file is missing or changed at run end, the adapter restores it and the run fails with `prime_settings_tampered`, with no `clearSession`.
+11. **The agent dir is an allowlist.** Top-level entries other than `settings.json`, `auth.json`, `sessions/`, `session-artifacts/`, `harness/`, `skills/`, `refinement_history.jsonl`, `telemetry.json`, `.paperclip-disabled/`, `session-leases/`, `rlm-ledger/`, `logs/` and `daemon-workers/` move aside with a warning, `models.json` included, because it can send the token to another host. The catalog caches `models/` and `mcp-service-catalog.v2.json` are deleted and listed in `cachesCleared`, with no warning.
+12. **The model catalog.** After `create`, Prime's catalog (`get_model_catalog`) is read every 500 ms for up to 15 s. Each `allowedModels` entry must be listed, an `anthropic` one must have `baseUrl` `https://api.anthropic.com`, and each must have reasoning when `thinking` is set and not `off`. Then `set_thinking_level` is sent again, and `get_state` must report the configured level. The catalog is checked again after each `model_catalog_changed` during the run. A failure is `prime_model_catalog_invalid`, with no `clearSession`. `thinking` must be a level the model supports.
 
 ## Changing the model
 

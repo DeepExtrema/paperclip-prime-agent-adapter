@@ -1,6 +1,6 @@
 {
   "name": "@deepextrema/paperclip-prime-local-adapter",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Paperclip external adapter that runs Prime Agent (prime-agent) locally as the prime_agent_local adapter type.",
   "license": "MIT",
   "type": "module",
@@ -51,7 +51,7 @@
   "devDependencies": {
     "@types/node": "^24.0.0",
     "typescript": "7.0.2",
-    "vitest": "4.1.11"
+    "vitest": "4.1.12"
   },
   "engines": {
     "node": ">=24.11.0"

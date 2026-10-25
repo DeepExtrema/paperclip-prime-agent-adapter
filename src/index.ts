@@ -35,10 +35,14 @@ Core fields:
 Credentials:
 - credentialMode "host_auth" (default): the host ~/.prime/agent/auth.json is symlinked into the agent's own Prime dir. Unsafe with Prime 0.10: a token refresh replaces the link and splits the login
 - credentialMode "api_key": set apiKeyEnvVar to the env var (bound to a Paperclip secret) that holds the provider key. A Claude sk-ant-oat subscription token is billed as subscription. The variable is removed from Prime's own environment
+- credentialMode "managed_subscription": the agent's Paperclip AI connection to the Claude subscription. Needs featureProfile "governed-v1", an anthropic/… model and allowedModels. auth.json is deleted after every run
 
 Model allowlist:
 - allowedModels (string[] of provider/modelId, optional): the adapter writes Prime's allowlist and model roles before every run, checks settings.json and auth.json after it, and audits each actor's model from Prime's session files (resultJson.modelAudit). Any breach fails the run
 - modelRoles (object, optional, needs allowedModels): subagentDefaultModel, auxiliaryModel, providerBackupModel, imageModel → provider/modelId. Default: model
+
+Feature profile:
+- Optional \`featureProfile: "governed-v1"\` (needs \`allowedModels\`, \`runtime: "daemon"\` and \`credentialMode\` \`managed_subscription\` or \`api_key\`): memory on; background refinement, factory, quota auto-resume, traces and telemetry off; \`rlmMaxDepth\` default 1; sessions per run capped by \`maxSubagentsPerRun\` (1–8, default 2); \`settings.json\` limited to an allowlist; agent-dir context files, the workspace's \`.prime/agent/\` (except one managed \`settings.json\` that stays), saved Prime schedules, goals not set by Paperclip, non-memory global harness entries and agent-installed skills disabled at run start; agent-dir files off an allowlist (such as \`models.json\`) moved aside; the parent's skill list limited to Paperclip skills and allowlisted built-ins and checked before the first prompt, and any other session that loads a skill off that list ended; the allowed models checked in the model catalog for the Anthropic address and for reasoning, before the first prompt and after each refresh, and the parent's thinking level checked before the first prompt. \`credentialMode: "managed_subscription"\` needs this profile.
 
 Operational fields:
 - timeoutSec (number, optional): run timeout in seconds (0 = none)
