@@ -61,7 +61,7 @@ describe("docs/troubleshooting.md", () => {
   it("documents every check code, result error code and thrown error code", () => {
     const thrown = [...read("src/errors.ts").matchAll(/"(prime_[a-z_]+)"/g)].map((match) => match[1]!);
     const codes = new Set<string>([...PRIME_CHECK_CODES, ...PRIME_RESULT_ERROR_CODES, ...thrown]);
-    expect(codes.size).toBe(49);
+    expect(codes.size).toBe(50);
     const doc = read("docs/troubleshooting.md");
     for (const code of codes) expect(doc, code).toContain("`" + code + "`");
   });

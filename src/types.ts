@@ -429,5 +429,7 @@ export const PRIME_RESULT_ERROR_CODES = [
   "prime_feature_profile_invalid",
   /** TAI-273 §2.2 item 2: a session over maxSubagentsPerRun could not be ended, or an ended session ran again. */
   "prime_subagent_limit_exceeded",
+  /** TAI-273 §4.3 item 2: the saved session's lease is held by another Prime process. No session fields, no clearSession. */
+  "prime_session_busy",
 ] as const;
 export type PrimeResultErrorCode = (typeof PRIME_RESULT_ERROR_CODES)[number];

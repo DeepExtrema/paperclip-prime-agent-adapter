@@ -298,7 +298,8 @@ async function runPrime(
   const firstFailed = !first.proc.timedOut && (first.proc.exitCode !== 0 || first.parsed.errors.length > 0);
   if (saved && resumeSessionFile !== null && firstFailed && isPrimeUnknownSessionError(first.proc.stdout, first.proc.stderr)) {
     await ctx.onLog("stdout", `[paperclip] Prime session "${saved.sessionId}" is unavailable; retrying with a fresh session.\n`);
-    return mapResult(audited(await runAttempt(ctx, prep, system, notes, null)), prep, true);
+    // TAI-273 §4.3 item 1: return the new session, not clearSession, so the host replaces the row instead of dropping it.
+    return mapResult(audited(await runAttempt(ctx, prep, system, notes, null)), prep, false);
   }
   return mapResult(audited(first), prep, false);
 }

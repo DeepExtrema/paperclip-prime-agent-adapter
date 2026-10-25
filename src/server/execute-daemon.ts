@@ -1,5 +1,6 @@
 import type {AdapterExecutionContext, AdapterExecutionResult} from "@paperclipai/adapter-utils";
 import {spawn} from "node:child_process";
+import {readFileSync} from "node:fs";
 import {randomBytes} from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -10,7 +11,7 @@ import {type ParsedPrimeOutput, PRIME_ADAPTER_TYPE, type PrimeSessionParams} fro
 import { emitPrimeMeta, type PreparedRun, type SystemPrompt } from "./execute.js";
 import type { ForeignGoal, GovernedRunState } from "./governed-run.js";
 import { notePrimeChild, notePrimeParent, type PrimeAuditSources } from "./model-policy.js";
-import {parsePrimeJsonl, primeProviderErrorCode} from "./parse.js";
+import {isPrimeUnknownSessionError, parsePrimeJsonl, primeProviderErrorCode} from "./parse.js";
 import { PrimeSessionTracker, readPrimeRosterRow, type PrimeTrackerViolation } from "./session-cap.js";
 
 export type PrimeDaemonErrorCode =|"prime_daemon_start_failed"|"prime_daemon_socket_unsafe"|
@@ -279,6 +280,11 @@ export function primeDaemonSocketPlan(childEnv: Record<string, string | undefine
   return {env, socketPath};
 }
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+/** A live process; a zombie (state Z) is not alive. */
+function isAlive(pid: number): boolean {
+  try { process.kill(pid, 0); } catch { return false; }
+  try { return readFileSync(`/proc/${pid}/stat`, "utf8").split(") ")[1]?.[0] !== "Z"; } catch { return true; }
+}
 function signalGroup(pid: number, signal: NodeJS.Signals) {
   try { process.kill(-pid, signal); }
   catch (err) { if ((err as NodeJS.ErrnoException).code !== "ESRCH") throw err; }
@@ -347,10 +353,12 @@ export async function startDaemon(ctx: AdapterExecutionContext, prep: PreparedRu
           workers.clear();
         }
       }
-      if (exited && exitCode !== 0 && workers.size > 0) {
-        for (const pid of workers) signalGroup(pid, "SIGTERM");
-        await delay(prep.runtime.graceSec * 1000);
-        for (const pid of workers) signalGroup(pid, "SIGKILL");
+      // TAI-273 §4.3 item 5: workers lead their own process group (N0 item 13), so a daemon exit alone may not reach them.
+      const alive = () => [...workers].filter(isAlive);
+      if (exited && alive().length > 0) {
+        for (const pid of alive()) signalGroup(pid, "SIGTERM");
+        for (const until = Date.now() + prep.runtime.graceSec * 1000; alive().length > 0 && Date.now() < until;) await delay(50);
+        for (const pid of alive()) signalGroup(pid, "SIGKILL");
       }
     } finally { client?.close(); await fs.rm(socketPath, { force: true }); }
   };
@@ -368,7 +376,7 @@ export async function startDaemon(ctx: AdapterExecutionContext, prep: PreparedRu
     return { pid: child.pid!, socketPath, get stderrTail() { return stderrTail; }, client, workers, stopDaemon };
   } catch (err) { await stopDaemon(); throw err; }
 }
-type Stage = "create_failed" | "prompt_failed" | "completed" | "closed" | "timed_out" | "cancelled" | "policy_failed";
+type Stage = "create_failed" | "prompt_failed" | "completed" | "closed" | "timed_out" | "cancelled" | "policy_failed" | "session_busy";
 type StatsDelta = { input: number; output: number; cacheRead: number; cacheWrite: number; total: number; cost: number };
 type SessionSummary = { activeSessionId: string; sessionId: string; sessionFile: string; provider: string | null; model: string | null; thinkingLevel: string | null };
 type Outcome = {
@@ -378,6 +386,9 @@ type Outcome = {
 };
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const str = (value: unknown) => (typeof value === "string" && value.length > 0 ? value : null);
+/** The daemon's errorInfo.code (0.10.1 DaemonErrorInfo, for example session_already_active), else null. */
+const errorInfoCode = (response: PrimeDaemonResponse): string | null =>
+  isObject((response as unknown as Record<string, unknown>).errorInfo) ? str(((response as unknown as Record<string, unknown>).errorInfo as Record<string, unknown>).code) : null;
 
 function readSummary(data: unknown): SessionSummary | null {
   if (!isObject(data)) return null;
@@ -557,10 +568,10 @@ async function runAttempt(
     const savedGoal = governed && resumeSessionFile ? (await readGoalState(resumeSessionFile)).goal : null;
     const foreign = savedGoal && (savedGoal.status === "active" || savedGoal.status === "paused")
       && savedGoal.objective !== native.goal?.objective ? savedGoal : null;
-    const createSession = async (sessionPath: string | null): Promise<SessionSummary | string> => {
+    const createSession = async (sessionPath: string | null): Promise<SessionSummary | { error: string; code: string | null }> => {
       const created = await client.request({ type: "create", lifecycle: "resident", config, ...(sessionPath ? { sessionPath } : {}) }, 60_000);
       const summary = created.success ? readSummary(created.data) : null;
-      if (!summary) return created.error ?? `Unexpected create response: ${JSON.stringify(created).slice(0, 300)}`;
+      if (!summary) return { error: created.error ?? `Unexpected create response: ${JSON.stringify(created).slice(0, 300)}`, code: errorInfoCode(created) };
       if (isObject(created.data) && typeof created.data.workerPid === "number") daemon.workers.add(created.data.workerPid);
       notePrimeParent(sources, { sessionId: summary.sessionId, sessionFile: summary.sessionFile });
       return summary;
@@ -579,11 +590,26 @@ async function runAttempt(
         await must({type : "set_thinking_level", level : runtime.thinking});
       if (native.rlmMaxDepth !== null) await must({type : "set_rlm_max_depth", maxDepth : native.rlmMaxDepth});
     };
-    const first = await createSession(resumeSessionFile);
-    if (typeof first === "string") return await outcome("create_failed", first);
+    let first = await createSession(resumeSessionFile);
+    let resumed = resumeSessionFile !== null;
+    if ("error" in first && resumeSessionFile) {
+      const id = path.basename(resumeSessionFile, ".jsonl");
+      // TAI-273 §4.3 item 2: a held lease means a process from an earlier run is alive; fail and keep the row.
+      if (first.code === "session_already_active" || /currently open in another/i.test(first.error)) {
+        const pid = /\bpid\D{0,3}(\d+)/i.exec(first.error)?.[1];
+        emit(`[paperclip] Prime session ${id} is held by another process${pid ? ` (pid ${pid})` : ""}; not starting.\n`);
+        return await outcome("session_busy", first.error);
+      }
+      // §4.3 item 1: a missing or unknown session file starts one fresh session, returned without clearSession.
+      if (first.code === "session_import_file_not_found" || isPrimeUnknownSessionError("", first.error) || /no such file|not found|does not exist/i.test(first.error)) {
+        emit(`[paperclip] Prime session ${id} is unavailable (${first.error}); starting a fresh session.\n`);
+        first = await createSession(null);
+        resumed = false;
+      }
+    }
+    if ("error" in first) return await outcome("create_failed", first.error);
     session = first;
     await setUp(session);
-    let resumed = resumeSessionFile !== null;
     if (foreign && governed) {
       const record: ForeignGoal = { goalId: str(foreign.goalId), objective: String(foreign.objective ?? "").slice(0, 200), status: String(foreign.status), action: "cleared" };
       governed.live.foreignGoals.push(record);
@@ -595,7 +621,7 @@ async function runAttempt(
         emit(`[paperclip] Prime session ${session.sessionId} holds a goal not set by Paperclip; starting a fresh session.\n`);
         await client.request({ type: "kill", activeSessionId: session.activeSessionId }, 30_000);
         const fresh = await createSession(null);
-        if (typeof fresh === "string") return await outcome("create_failed", fresh);
+        if ("error" in fresh) return await outcome("create_failed", fresh.error);
         session = fresh;
         await setUp(session);
         resumed = false;
@@ -750,6 +776,8 @@ function mapResult(o: Outcome, prep: PreparedRun, daemon: RunDaemon, clearSessio
   const fail = (errorCode: string, errorMessage: string): AdapterExecutionResult => ({ ...base, errorCode, errorMessage });
   switch (o.stage) {
     case "policy_failed": return fail(o.violation!.code, o.violation!.message);
+    case "session_busy": return { ...fail("prime_session_busy", o.error ?? "The Prime session is held by another process."),
+      executionRecovery: { kind: "bootstrap", providerWorkStarted: false } };
     case "timed_out": return { ...fail("prime_run_timeout", `Timed out after ${runtime.timeoutSec}s${o.error ? `: ${o.error}` : ""}`), exitCode: null, timedOut: true };
     case "cancelled": return fail("prime_run_cancelled", "Run cancelled.");
     case "closed": return fail("prime_run_uncertain", `Prime daemon connection lost; the run outcome is uncertain. ${o.error}`);

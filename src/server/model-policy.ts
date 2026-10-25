@@ -436,8 +436,9 @@ export async function finishPrimeRun(result: AdapterExecutionResult, input: {
   const label = modelAudit.ok ? {} : forbidden ? { provider: forbidden.model.slice(0, forbidden.model.indexOf("/")), model: forbidden.model } : { model: "unverified" };
   if (failures.length === 0) return { ...result, ...label, resultJson };
   const { sessionId: _id, sessionParams: _params, sessionDisplayId: _display, ...rest } = result;
+  // TAI-273 §4.3 item 3: never resume a failed policy run. The saved row points at the file that now holds this run's turns.
   return {
-    ...rest, ...label, resultJson,
+    ...rest, ...label, resultJson, clearSession: true,
     exitCode: result.exitCode === 0 ? 1 : result.exitCode,
     errorCode: failures[0]!.code,
     errorMessage: [...failures.map((failure) => failure.message), ...(result.errorCode ? [`Run result before the checks: ${result.errorCode}${result.errorMessage ? ` (${result.errorMessage})` : ""}.`] : [])].join(" "),

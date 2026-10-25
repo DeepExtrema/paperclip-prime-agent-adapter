@@ -164,12 +164,11 @@ describe("execute: resume (INTERFACES §11.4, §7, §16 A2)", () => {
   });
 });
 describe("execute: unknown session (INTERFACES §11.6)", () => {
-  it("retries once with a fresh session and clears the stored session", async () => {
+  it("retries once with a fresh session and returns it without clearSession (TAI-273 §4.3 item 1)", async () => {
     const { result, logs } = await run({ sessionParams: writeSavedSession(), env: { FAKE_PRIME_RESUME_MODE: "unknown_session" } });
     expect(runCalls().map((call) => call.argv.includes("-r"))).toEqual([true, false]);
     expect(logs).toContainEqual(["stdout", `[paperclip] Prime session "${SESSION2}" is unavailable; retrying with a fresh session.\n`]);
-    expect(result).toMatchObject({ exitCode: 0, errorCode: null, clearSession: true });
-    expect(result).not.toHaveProperty("sessionParams");
+    expect(result).toMatchObject({ exitCode: 0, errorCode: null, clearSession: false, sessionId: SESSION2, sessionParams: { sessionId: SESSION2 } });
   });
 });
 describe("execute: failed runs (INTERFACES §11.7)", () => {
