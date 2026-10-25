@@ -20,7 +20,9 @@ type DaemonAnswer = { success: boolean; data?: unknown; error?: string };
 export interface PrimeTrackerClient {
   request(command: Record<string, unknown> & { type: string }, timeoutMs: number | null): Promise<DaemonAnswer>;
 }
-export interface PrimeTrackerViolation { code: "prime_subagent_limit_exceeded" | "prime_provider_quota" | "prime_skill_list_invalid"; message: string }
+export interface PrimeTrackerViolation {
+  code: "prime_subagent_limit_exceeded" | "prime_provider_quota" | "prime_skill_list_invalid" | "prime_model_catalog_invalid"; message: string;
+}
 export type PrimeSessionCheck = (row: PrimeRosterRow) => Promise<{ ok: boolean; notAllowed: string[]; reason: string | null }>;
 
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
@@ -77,6 +79,9 @@ export class PrimeSessionTracker {
   isEnded(activeSessionId: string): boolean {
     return [...this.ended.values()].some((entry) => entry.activeSessionId === activeSessionId);
   }
+
+  /** True when roster_subscribe was refused and the tracker lists every 5 s (item 12 then reads the catalog every 60 s). */
+  get polling(): boolean { return this.poll !== null; }
 
   /** Sessions other than the parent seen in this run, finished ones included. */
   get sessions(): number { return this.seen.size; }

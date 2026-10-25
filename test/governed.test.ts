@@ -1,4 +1,4 @@
-// TAI-273 plan rev 9 §2.2 (G6): featureProfile "governed-v1", items 1-10 and the model-audit fix.
+// TAI-273 plan rev 9 §2.2 (G6): featureProfile "governed-v1", items 1-12 and the model-audit fix.
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
@@ -104,7 +104,7 @@ describe("item 1: managed keys, env and depth", () => {
     expect(report).toMatchObject({ profile: "governed-v1", maxSubagentsPerRun: 2, sessions: 0, sessionsEnded: [], skillDiscovery: "off", sessionSkillChecks: 0,
       settingsKeysRemoved: [], contextFilesDisabled: [], projectConfigDisabled: [], agentDirDisabled: [], foreignGoals: [],
       harnessEntriesDisabled: [], agentSkills: [], agentSkillsDisabled: [], scheduledJobsDisabled: 0, scheduledJobsCreated: 0,
-      cachesCleared: [], modelCatalog: null, warnings: [] });
+      cachesCleared: [], modelCatalog: { ok: true, checks: 1, refreshesSeen: 0, thinkingLevel: null, failure: null }, warnings: [] });
   });
   it("fails a run that changes a managed key with prime_settings_tampered and clears nothing else", async () => {
     const { result } = await run({ env: { FAKE_DAEMON_EDIT_SETTINGS: JSON.stringify({ autoRefine: { enabled: true } }) } });
@@ -326,12 +326,79 @@ describe("item 7: goals not set by Paperclip", () => {
     expect(second.report.foreignGoals).toMatchObject([{ action: "fresh_session" }]);
     expect(second.log).toContain(`Prime session ${String(first.result.sessionId)} holds a goal not set by Paperclip; starting a fresh session.`);
   });
+  it("runs item 10's check and item 12's thinking-level step on the fresh session too", async () => {
+    const { first } = await resumeWithGoal("Keep polling forever", { config: { thinking: "high" }, env: { FAKE_DAEMON_GOAL_CLEAR: "ignore" } });
+    const secondRun = commands().slice(commands().flatMap((c, index) => (c.type === "create" ? [index] : []))[1]);
+    const fresh = secondRun.filter((c) => c.type === "create" && !("sessionPath" in c)).length;
+    expect(fresh).toBe(1);
+    const after = secondRun.slice(secondRun.findIndex((c) => c.type === "kill"));
+    expect(after.map((c) => c.type).filter((t) => ["get_resource_snapshot", "get_state", "attach"].includes(t))).toEqual(["get_resource_snapshot", "get_state", "attach"]);
+    expect(first.result.errorCode).toBeNull();
+  });
   it("leaves a goal that matches adapterConfig.goal alone", async () => {
     const first = await run({ config: { goal: "Ship it" } });
     appendFileSync(String(first.result.sessionParams!.sessionFile), goal("Ship it"));
     const second = await run({ runId: "run-2", config: { goal: "Ship it" }, sessionParams: first.result.sessionParams! });
     expect(second.report.foreignGoals).toEqual([]);
     expect(commands().some((c) => c.message === "/goal clear")).toBe(false);
+  });
+});
+
+describe("item 12: the model catalog and the parent's thinking level", () => {
+  const entry = (over: Record<string, unknown> = {}) => ({ provider: "anthropic", id: "claude-haiku-4-5", baseUrl: "https://api.anthropic.com", reasoning: true, ...over });
+  const bootstrap = { errorCode: "prime_model_catalog_invalid", clearSession: false, executionRecovery: { kind: "bootstrap", providerWorkStarted: false } };
+  it("checks after the parent's skill check and before /goal clear, with the parent's activeSessionId", async () => {
+    await run({ config: { thinking: "high" } });
+    const order = types().filter((t) => ["create", "get_resource_snapshot", "get_model_catalog", "get_state", "attach", "prompt_and_wait"].includes(t));
+    expect(order).toEqual(["create", "get_resource_snapshot", "get_model_catalog", "get_state", "attach", "prompt_and_wait"]);
+    const created = commands().find((c) => c.type === "get_resource_snapshot")!.activeSessionId;
+    expect(commands().find((c) => c.type === "get_model_catalog")!.activeSessionId).toBe(created);
+  });
+  it("waits for a catalog that lands after create, then sets the thinking level again (TAI-339 change 1)", async () => {
+    const { result, report } = await run({ config: { thinking: "high" }, env: { FAKE_DAEMON_CATALOG_READY_MS: "1200", FAKE_DAEMON_THINKING_RACE: "1" } });
+    expect(result).toMatchObject({ exitCode: 0, errorCode: null });
+    expect(report.modelCatalog).toMatchObject({ ok: true, refreshesSeen: 0, thinkingLevel: "high", failure: null });
+    expect(report.modelCatalog.checks).toBeGreaterThan(1);
+    expect(commands().filter((c) => c.type === "set_thinking_level")).toHaveLength(2);
+  });
+  it("fails before any prompt when the catalog never shows the model with reasoning in 15 s", async () => {
+    const { result, report, log } = await run({ config: { thinking: "high" }, env: { FAKE_DAEMON_CATALOG_READY_MS: "60000" } });
+    expect(result).toMatchObject(bootstrap);
+    expect(result.sessionParams).toBeUndefined();
+    expect(report.modelCatalog).toMatchObject({ ok: false, failure: `${MODEL} has no reasoning (thinking is high)` });
+    expect(report.modelCatalog.checks).toBeGreaterThanOrEqual(25);
+    expect(log).toContain(`[paperclip] Prime model catalog check failed: ${MODEL} has no reasoning (thinking is high)`);
+    expect(types()).not.toContain("prompt_and_wait");
+  }, 30_000);
+  it("fails on an allowed anthropic model at another address, and on an allowed model that is not listed", async () => {
+    const moved = await run({ env: { FAKE_DAEMON_CATALOG: JSON.stringify([entry({ baseUrl: "https://n0-redirect.invalid" })]) } });
+    expect(moved.result).toMatchObject(bootstrap);
+    expect(moved.log).toContain(`${MODEL} has baseUrl "https://n0-redirect.invalid", not https://api.anthropic.com`);
+    const missing = await run({ runId: "run-2", env: { FAKE_DAEMON_CATALOG: JSON.stringify([entry({ id: "claude-opus-5-5" })]), FAKE_DAEMON_CATALOG_READY_MS: "0" } });
+    expect(missing.result.errorMessage).toContain(`${MODEL} is not listed`);
+  }, 40_000);
+  it("ignores an anthropic entry outside allowedModels (rev 9 narrowed rule)", async () => {
+    const { result } = await run({ env: { FAKE_DAEMON_CATALOG: JSON.stringify([entry(), entry({ id: "n0-probe", baseUrl: "http://127.0.0.1:9" })]) } });
+    expect(result.errorCode).toBeNull();
+  });
+  it("fails when the thinking level does not take", async () => {
+    const { result, report } = await run({ config: { thinking: "high" }, env: { FAKE_DAEMON_THINKING_STUCK: "1" } });
+    expect(result).toMatchObject(bootstrap);
+    expect(report.modelCatalog).toMatchObject({ ok: false, thinkingLevel: "off", failure: 'thinking level is "off", configured "high"' });
+  });
+  it("re-checks after model_catalog_changed during the run, and fails the run with no clearSession", async () => {
+    const { result, report, log } = await run({ env: { FAKE_DAEMON_PROMPT_DELAY_MS: "800",
+      FAKE_DAEMON_CATALOG_REFRESH: JSON.stringify([entry({ baseUrl: "https://elsewhere.invalid" })]) } });
+    expect(result).toMatchObject({ errorCode: "prime_model_catalog_invalid", clearSession: false });
+    expect(result.executionRecovery).toBeUndefined();
+    expect(report.modelCatalog).toMatchObject({ ok: false, refreshesSeen: 1, checks: 2 });
+    expect(log).toContain(`[paperclip] Prime model catalog check failed: ${MODEL} has baseUrl "https://elsewhere.invalid"`);
+    expect(types()).toContain("abort");
+  });
+  it("reads the catalog every 60 s and after the last turn when roster_subscribe is refused", async () => {
+    const { result, report } = await run({ env: { FAKE_DAEMON_REFUSE: "roster_subscribe" } });
+    expect(result.errorCode).toBeNull();
+    expect(report.modelCatalog).toMatchObject({ ok: true, checks: 2, refreshesSeen: 0 });
   });
 });
 

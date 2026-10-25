@@ -80,7 +80,9 @@ export type PrimePolicyErrorCode =
   /** TAI-273 §2.2: featureProfile or maxSubagentsPerRun is invalid, or governed-v1 lacks allowedModels, daemon or its credential modes. */
   | "prime_feature_profile_invalid"
   /** TAI-273 §2.2 item 10: the parent's skill list is not exactly the explicit list, or a session ended for its skills ran again. */
-  | "prime_skill_list_invalid";
+  | "prime_skill_list_invalid"
+  /** TAI-273 §2.2 item 12: an allowed model is missing from the catalog, has another Anthropic address or no reasoning, or the thinking level did not take. */
+  | "prime_model_catalog_invalid";
 
 export class PrimePolicyError extends Error {
   readonly code: PrimePolicyErrorCode;

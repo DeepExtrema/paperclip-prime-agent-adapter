@@ -45,6 +45,16 @@ const rosterItem = (s) => ({ agentId: s.sessionId, summary: summary(s), status: 
 const rosterChanged = (s) => { for (const c of subscribers) send(c, { type: "roster_update", changed: [rosterItem(s)] }); };
 const rosterRemoved = (id) => { for (const c of subscribers) send(c, { type: "roster_update", changed: [], removed: [id] }); };
 const send = (socket, message) => { if (!socket.destroyed) socket.write(`${JSON.stringify(message)}\n`); };
+// TAI-273 §2.2 item 12 (TAI-339 probe t2): get_model_catalog needs a session; until the GitHub fetch lands
+// (FAKE_DAEMON_CATALOG_READY_MS after start) every entry has reasoning false, and with FAKE_DAEMON_THINKING_RACE=1 a session
+// created then starts at "off" and ignores set_thinking_level (FAKE_DAEMON_THINKING_STUCK=1: always). FAKE_DAEMON_CATALOG: JSON model list. FAKE_DAEMON_CATALOG_REFRESH:
+// JSON model list that replaces it during the parent's turn, with a model_catalog_changed to every roster subscriber.
+const startedAt = Date.now();
+const DEFAULT_CATALOG = ["claude-haiku-4-5", "claude-opus-4-7", "claude-opus-5-5"].map((id) => ({ provider: "anthropic", id, baseUrl: "https://api.anthropic.com", reasoning: true }));
+let refreshed = null;
+const catalogReady = () => Date.now() - startedAt >= Number(env.FAKE_DAEMON_CATALOG_READY_MS ?? "0");
+const catalogModels = () => refreshed ?? (catalogReady() ? JSON.parse(env.FAKE_DAEMON_CATALOG ?? "null") ?? DEFAULT_CATALOG
+  : DEFAULT_CATALOG.map((model) => ({ ...model, reasoning: false })));
 const eventsOf = () => (env.FAKE_DAEMON_EVENTS_FILE ? readFileSync(env.FAKE_DAEMON_EVENTS_FILE, "utf8").split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l)).filter((e) => e.type !== "session") : []);
 const usageOf = (events) => {
   const sum = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0 };
@@ -99,7 +109,7 @@ function create(command, depth = 0) {
   const initial = JSON.parse(env.FAKE_DAEMON_INITIAL_STATS ?? '{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0,"cost":0}');
   const s = { id: `a${process.pid.toString(16)}${++nextSession}`.slice(0, 12), sessionId, sessionFile, cwd: config.cwd, config,
     provider: env.FAKE_DAEMON_MODEL_PROVIDER ?? config.provider ?? "anthropic", model: env.FAKE_DAEMON_MODEL_ID ?? config.model ?? "claude-opus-4-7",
-    thinking: config.thinking ?? "medium", streaming: env.FAKE_DAEMON_STREAMING_AT_START === "1", prompted: false, messages: 0, seq: 0,
+    thinking: (env.FAKE_DAEMON_THINKING_RACE === "1" && !catalogReady()) || env.FAKE_DAEMON_THINKING_STUCK === "1" ? "off" : config.thinking ?? "medium", streaming: env.FAKE_DAEMON_STREAMING_AT_START === "1", prompted: false, messages: 0, seq: 0,
     stats: initial, last: null, clients: new Set(), pending: null, rlmMaxDepth: 2 };
   sessions.set(s.id, s);
   return s;
@@ -186,7 +196,11 @@ async function handle(socket, id, command) {
     }
     case "attach": s.clients.add(socket); return ok({ activeSessionId: s.id, snapshot: { activeSessionId: s.id, summary: summary(s), messages: [] } });
     case "detach": s.clients.delete(socket); return ok();
-    case "set_thinking_level": s.thinking = command.level; return ok();
+    case "set_thinking_level":
+      if (!(env.FAKE_DAEMON_THINKING_RACE === "1" && !catalogReady()) && env.FAKE_DAEMON_THINKING_STUCK !== "1") s.thinking = command.level;
+      return ok();
+    case "get_state": return ok({ thinkingLevel: s.thinking, model: { provider: s.provider, id: s.model } });
+    case "get_model_catalog": return ok({ models: catalogModels() });
     case "set_model": s.provider = command.provider; s.model = command.modelId; return ok();
     case "set_rlm_max_depth": s.rlmMaxDepth = command.maxDepth; return ok({ maxDepth: command.maxDepth, source: "chat", globalSaved: false });
     case "get_session_stats": {
@@ -221,6 +235,10 @@ async function handle(socket, id, command) {
       s.prompted = true;
       const mode = env.FAKE_DAEMON_PROMPT_MODE ?? "ok";
       if (mode === "busy") return fail(PROCESSING);
+      if (env.FAKE_DAEMON_CATALOG_REFRESH) {
+        refreshed = JSON.parse(env.FAKE_DAEMON_CATALOG_REFRESH);
+        for (const c of subscribers) send(c, { type: "model_catalog_changed" });
+      }
       if (env.FAKE_DAEMON_EDIT_SETTINGS) mergeJson(path.join(s.config.agentDir, "settings.json"), JSON.parse(env.FAKE_DAEMON_EDIT_SETTINGS));
       if (env.FAKE_DAEMON_EDIT_AUTH) mergeJson(path.join(s.config.agentDir, "auth.json"), JSON.parse(env.FAKE_DAEMON_EDIT_AUTH));
       // FAKE_DAEMON_REMOVE_FILES: paths removed by "the agent" during its turn (git clean, rm -rf); FAKE_DAEMON_LINKS: {path: target}.

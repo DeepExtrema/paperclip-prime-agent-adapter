@@ -4,6 +4,7 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { PrimeFeatureProfile } from "./feature-profile.js";
+import type { PrimeModelCatalogRecord } from "./model-catalog.js";
 import { PRIME_WORKSPACE_SETTINGS } from "./skill-list.js";
 
 const CONTEXT_FILES = ["AGENTS.md", "SYSTEM.md", "APPEND_SYSTEM.md"] as const;
@@ -30,6 +31,8 @@ export interface GovernedRunLive {
   contextFiles: string[];
   /** Warnings found during the run (item 10 session ends). */
   warnings: string[];
+  /** Item 12, once the daemon path has run the check. */
+  modelCatalog: PrimeModelCatalogRecord | null;
 }
 
 export interface GovernedRunState {
@@ -77,7 +80,7 @@ export interface GovernedReport {
   harnessFingerprint: { before: Sha; after: Sha };
   refinementEvents: { before: number; after: number };
   cachesCleared: Array<{ name: string; sha256: Sha }>;
-  modelCatalog: null;
+  modelCatalog: PrimeModelCatalogRecord | null;
   warnings: string[];
 }
 
@@ -361,7 +364,7 @@ export async function startGovernedRun(input: {
     profile, agentDir, cwd, runId, disabledDir, agentSkillsDisabled: [], agentDirDisabled: [], contextFilesDisabled: [], projectConfigDisabled: [],
     scheduledJobsDisabled: 0, harnessEntriesDisabled: [], harnessBefore: null, refinementEventsBefore: 0, contextFilesBefore: new Map(),
     cachesCleared: [], startWarnings: [],
-    live: { sessions: 0, sessionsEnded: [], sessionSkillChecks: 0, foreignGoals: [], skillDiscovery: "on", contextFiles: [], warnings: [] },
+    live: { sessions: 0, sessionsEnded: [], sessionSkillChecks: 0, foreignGoals: [], skillDiscovery: "on", contextFiles: [], warnings: [], modelCatalog: null },
   };
   // Item 4: saved Prime schedules.
   for (const file of await findJobFiles(path.join(agentDir, "session-artifacts"))) {
@@ -478,7 +481,7 @@ export async function finishGovernedRun(state: GovernedRunState, settingsKeysRem
     harnessEntriesDisabled: state.harnessEntriesDisabled, harnessBytes: await treeBytes(path.join(agentDir, "harness")),
     harnessFingerprint: { before: state.harnessBefore, after: await sha256File(path.join(agentDir, "harness", "harness_state.json")) },
     refinementEvents: { before: state.refinementEventsBefore, after: await lineCount(path.join(agentDir, "refinement_history.jsonl")) },
-    cachesCleared: state.cachesCleared, modelCatalog: null, warnings,
+    cachesCleared: state.cachesCleared, modelCatalog: state.live.modelCatalog, warnings,
   };
   return { report, workspaceFile: workspaceProblem };
 }

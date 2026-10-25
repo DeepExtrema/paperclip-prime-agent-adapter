@@ -433,5 +433,7 @@ export const PRIME_RESULT_ERROR_CODES = [
   "prime_session_busy",
   /** TAI-273 §2.2 item 10: the parent's skill list is wrong (before any prompt), or a session ended for its skills could not be ended or ran again. */
   "prime_skill_list_invalid",
+  /** TAI-273 §2.2 item 12: the model-catalog check or the parent's thinking level failed. Before the first prompt: no session fields, no clearSession. */
+  "prime_model_catalog_invalid",
 ] as const;
 export type PrimeResultErrorCode = (typeof PRIME_RESULT_ERROR_CODES)[number];

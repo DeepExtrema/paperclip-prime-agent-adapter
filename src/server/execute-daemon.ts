@@ -14,6 +14,7 @@ import { notePrimeChild, notePrimeParent, type PrimeAuditSources } from "./model
 import {isPrimeUnknownSessionError, parsePrimeJsonl, primeProviderErrorCode} from "./parse.js";
 import { PrimeSessionTracker, type PrimeTrackerViolation } from "./session-cap.js";
 import { checkPrimeSkillList } from "./skill-list.js";
+import { CATALOG_POLL_MS, confirmPrimeThinkingLevel, readPrimeCatalogProblem, waitForPrimeCatalog, type PrimeModelCatalogRecord } from "./model-catalog.js";
 
 export type PrimeDaemonErrorCode =|"prime_daemon_start_failed"|"prime_daemon_socket_unsafe"|
   "prime_daemon_protocol_error"|"prime_daemon_closed"|"prime_daemon_request_timeout";
@@ -377,7 +378,7 @@ export async function startDaemon(ctx: AdapterExecutionContext, prep: PreparedRu
     return { pid: child.pid!, socketPath, get stderrTail() { return stderrTail; }, client, workers, stopDaemon };
   } catch (err) { await stopDaemon(); throw err; }
 }
-type Stage = "create_failed" | "prompt_failed" | "completed" | "closed" | "timed_out" | "cancelled" | "policy_failed" | "session_busy" | "skill_list_failed";
+type Stage = "create_failed" | "prompt_failed" | "completed" | "closed" | "timed_out" | "cancelled" | "policy_failed" | "session_busy" | "skill_list_failed" | "catalog_failed";
 type StatsDelta = { input: number; output: number; cacheRead: number; cacheWrite: number; total: number; cost: number };
 type SessionSummary = { activeSessionId: string; sessionId: string; sessionFile: string; provider: string | null; model: string | null; thinkingLevel: string | null };
 type Outcome = {
@@ -499,6 +500,27 @@ async function runAttempt(
   let stop: ReturnType<typeof watchStop>|null = null;
   let tracker: PrimeSessionTracker | null = null;
   let violation: PrimeTrackerViolation | null = null;
+  // TAI-273 §2.2 item 12: set once the pre-prompt check passed; catalogParent once the run is live.
+  let catalog: PrimeModelCatalogRecord | null = null;
+  let catalogParent: string | null = null;
+  let catalogPoll: NodeJS.Timeout | null = null;
+  let catalogChecking: Promise<void> | null = null;
+  /** During the run, a failed check aborts the turn, and the run fails with no clearSession (the daemon stops in executeDaemon). */
+  const recheckCatalog = (): Promise<void> => {
+    if (!catalog || !catalog.ok || catalogParent === null || violation) return Promise.resolve();
+    const parent = catalogParent;
+    catalogChecking ??= (async () => {
+      catalog!.checks += 1;
+      const problem = await readPrimeCatalogProblem(daemon.client, parent, prep.policy.allowedModels ?? [], prep.runtime.thinking);
+      if (!problem || violation) return;
+      catalog!.ok = false;
+      catalog!.failure = problem;
+      violation = { code: "prime_model_catalog_invalid", message: `Prime model catalog check failed: ${problem}` };
+      emit(`[paperclip] ${violation.message}\n`);
+      stop?.fire("policy");
+    })().finally(() => { catalogChecking = null; });
+    return catalogChecking;
+  };
   const stopReason = (): StopReason | null => (violation ? "policy" : null) ?? stop?.reason() ?? pendingStop(ctx, prep);
   const outcome = async(stage: Stage | StopReason, error: string | null, extra: Partial<Outcome> = {}): Promise<Outcome> => {
     await logChain;
@@ -542,6 +564,11 @@ async function runAttempt(
         if (Array.isArray(message.changed)) tracker?.ingest(message.changed);
         if (message.resync === true) void tracker?.list();
       } else if (message.type === "session_binding") void tracker?.list();
+      // TAI-273 §2.2 item 12: a catalog refresh during the run (the event needs roster_subscribe; TAI-339).
+      if (message.type === "model_catalog_changed" || (message.type === "event" && isObject(message.event) && message.event.type === "model_catalog_changed")) {
+        if (catalog) catalog.refreshesSeen += 1;
+        void recheckCatalog();
+      }
       if (message.type === "session_event" && isObject(message.event) && message.event.type === "rlm_child_update" &&
           isObject(message.event.child)) {
         const childId = str(message.event.child.activeSessionId);
@@ -601,6 +628,17 @@ async function runAttempt(
       governed.live.contextFiles = check.contextFiles;
       return null;
     };
+    // TAI-273 §2.2 item 12: the allowed models in the catalog, and the parent's thinking level, before the first prompt.
+    const allowedModels = prep.policy.allowedModels ?? [];
+    const confirmThinking = async (summary: SessionSummary): Promise<string | null> =>
+      (catalog && runtime.thinking !== null ? await confirmPrimeThinkingLevel(client, summary.activeSessionId, runtime.thinking, catalog) : null);
+    const catalogFailed = (problem: string) => {
+      catalog!.ok = false;
+      catalog!.failure = problem;
+      const message = `Prime model catalog check failed: ${problem}`;
+      emit(`[paperclip] ${message}\n`);
+      return message;
+    };
     let first = await createSession(resumeSessionFile);
     let resumed = resumeSessionFile !== null;
     if ("error" in first && resumeSessionFile) {
@@ -626,6 +664,13 @@ async function runAttempt(
       emit(`[paperclip] ${parentProblem}\n`);
       return await outcome("skill_list_failed", parentProblem, { session: null });
     }
+    if (governed) {
+      catalog = governed.live.modelCatalog = { ok: false, checks: 0, refreshesSeen: 0, thinkingLevel: null, failure: null };
+      const problem = await waitForPrimeCatalog(client, session.activeSessionId, allowedModels, runtime.thinking, catalog)
+        ?? await confirmThinking(session);
+      if (problem) return await outcome("catalog_failed", catalogFailed(problem), { session: null });
+      catalog.ok = true;
+    }
     if (foreign && governed) {
       const record: ForeignGoal = { goalId: str(foreign.goalId), objective: String(foreign.objective ?? "").slice(0, 200), status: String(foreign.status), action: "cleared" };
       governed.live.foreignGoals.push(record);
@@ -646,6 +691,8 @@ async function runAttempt(
           emit(`[paperclip] ${freshProblem}\n`);
           return await outcome("skill_list_failed", freshProblem, { session: null });
         }
+        const thinkingProblem = await confirmThinking(session);
+        if (thinkingProblem) return await outcome("catalog_failed", catalogFailed(thinkingProblem), { session: null });
       }
     }
     const sid = session.activeSessionId;
@@ -680,6 +727,8 @@ async function runAttempt(
         onWarning: (text) => governed.live.warnings.push(text),
       });
       await tracker.start();
+      catalogParent = sid;
+      if (tracker.polling) catalogPoll = setInterval(() => void recheckCatalog(), CATALOG_POLL_MS);
     }
     const prompt = userPrompt(resumed);
     await emitPrimeMeta(ctx, prep, system,
@@ -742,6 +791,7 @@ async function runAttempt(
       if (!busy) break; await delay(250);
     }
     await tracker?.settle();
+    if (tracker?.polling) await recheckCatalog(); // item 12: once more after the last turn on the poll fallback
     if (stopReason()) return await outcome(stopReason()!, null);
     const last = await client.request({type : "get_last_assistant_text", activeSessionId : sid}, 30_000);
     const after = readStats(await client.request({type : "get_session_stats", activeSessionId : sid}, 30_000));
@@ -772,6 +822,8 @@ async function runAttempt(
     throw err;
   } finally {
     stop?.dispose();
+    if (catalogPoll) clearInterval(catalogPoll);
+    catalogParent = null;
     unsubscribe?.();
     tracker?.dispose();
     if (governed && tracker) {
@@ -803,6 +855,8 @@ function mapResult(o: Outcome, prep: PreparedRun, daemon: RunDaemon, clearSessio
     case "session_busy": return { ...fail("prime_session_busy", o.error ?? "The Prime session is held by another process."),
       executionRecovery: { kind: "bootstrap", providerWorkStarted: false } };
     case "skill_list_failed": return { ...fail("prime_skill_list_invalid", o.error ?? "The Prime skill list check failed."),
+      executionRecovery: { kind: "bootstrap", providerWorkStarted: false } };
+    case "catalog_failed": return { ...fail("prime_model_catalog_invalid", o.error ?? "The Prime model catalog check failed."),
       executionRecovery: { kind: "bootstrap", providerWorkStarted: false } };
     case "timed_out": return { ...fail("prime_run_timeout", `Timed out after ${runtime.timeoutSec}s${o.error ? `: ${o.error}` : ""}`), exitCode: null, timedOut: true };
     case "cancelled": return fail("prime_run_cancelled", "Run cancelled.");

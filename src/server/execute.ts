@@ -90,7 +90,7 @@ const throwIfAborted = (ctx: AdapterExecutionContext) => { if (ctx.signal?.abort
 const cancelledResult = (message: string): AdapterExecutionResult =>
   ({ exitCode: 1, signal: null, timedOut: false, errorCode: "prime_run_cancelled", errorMessage: message, clearSession: false });
 /** Codes that prove no provider work started (TAI-273 §3.2, §2.2): the host may treat the run as a bootstrap failure. */
-const BOOTSTRAP_CODES: readonly string[] = ["prime_managed_connection_invalid", "prime_feature_profile_invalid", "prime_skill_list_invalid"];
+const BOOTSTRAP_CODES: readonly string[] = ["prime_managed_connection_invalid", "prime_feature_profile_invalid", "prime_skill_list_invalid", "prime_model_catalog_invalid"];
 /** errorMeta.primeErrorCode: the `code` of any adapter error class (codes start with "prime_"), else null. A PrimePolicyError code is also the errorCode. */
 function preflightFailure(err: unknown): AdapterExecutionResult {
   if (err instanceof RunCancelledError) return cancelledResult(err.message);
