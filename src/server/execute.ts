@@ -22,6 +22,7 @@ import {
 import { primeGovernedManagedKeys, resolvePrimeFeatureProfile, type PrimeFeatureProfile } from "./feature-profile.js";
 import { finishGovernedRun, startGovernedRun, type GovernedRunState } from "./governed-run.js";
 import { finishPrimeManagedCredential, resolvePrimeManagedConnection, type PrimeManagedBinding } from "./managed-connection.js";
+import { primeBuiltinSkillDirs, primeReleaseDir } from "./skill-list.js";
 import { assertPrimeModelListed, listPrimeModels } from "./models.js";
 import { isPrimeUnknownSessionError, parsePrimeJsonl, primeProviderErrorCode } from "./parse.js";
 import { assertPrimeCwdAllowed, buildPrimeChildEnv, resolvePrimeCommand, resolvePrimeRuntimeConfig, seedPrimeAgentDir } from "./runtime-config.js";
@@ -47,6 +48,8 @@ export type PreparedRun = {
   seeded: SeededPrimeAgentDir; skills: StagedPrimeSkills; deadlineMs: number | null; policy: PrimeModelPolicy;
   /** TAI-273 §2.2: featureProfile "governed-v1", or null. */
   profile: PrimeFeatureProfile | null;
+  /** §2.2 item 10: `<release>/skills/<name>` for each allowlisted built-in under governed-v1; else empty. */
+  builtinSkillDirs: string[];
 };
 type Attempt = { proc: RunProcessResult; parsed: ParsedPrimeOutput };
 export type SystemPrompt = { text: string; notes: string[]; ownsDefaultPolicy: boolean };
@@ -87,7 +90,7 @@ const throwIfAborted = (ctx: AdapterExecutionContext) => { if (ctx.signal?.abort
 const cancelledResult = (message: string): AdapterExecutionResult =>
   ({ exitCode: 1, signal: null, timedOut: false, errorCode: "prime_run_cancelled", errorMessage: message, clearSession: false });
 /** Codes that prove no provider work started (TAI-273 §3.2, §2.2): the host may treat the run as a bootstrap failure. */
-const BOOTSTRAP_CODES: readonly string[] = ["prime_managed_connection_invalid", "prime_feature_profile_invalid"];
+const BOOTSTRAP_CODES: readonly string[] = ["prime_managed_connection_invalid", "prime_feature_profile_invalid", "prime_skill_list_invalid"];
 /** errorMeta.primeErrorCode: the `code` of any adapter error class (codes start with "prime_"), else null. A PrimePolicyError code is also the errorCode. */
 function preflightFailure(err: unknown): AdapterExecutionResult {
   if (err instanceof RunCancelledError) return cancelledResult(err.message);
@@ -136,10 +139,16 @@ async function prepareRun(ctx: AdapterExecutionContext, startedAtMs: number, nat
   throwIfAborted(ctx);
   assertPrimeModelListed(runtime.modelRef, await listPrimeModels({ command: runtime.command, env: childEnv, cwd }));
   throwIfAborted(ctx);
+  let builtinSkillDirs: string[] = [];
+  if (profile) {
+    const releaseDir = await primeReleaseDir(runtime.command, childEnv);
+    if (!releaseDir) throw new PrimePolicyError("prime_skill_list_invalid", `Cannot find the Prime release dir of ${runtime.command}, so its built-in skills cannot be passed by path.`);
+    builtinSkillDirs = primeBuiltinSkillDirs(releaseDir, native.goal !== null);
+  }
   const skills = await stagePrimeSkills(ctx.config);
   for (const line of skills.logLines) await ctx.onLog("stdout", line);
   const deadlineMs = runtime.timeoutSec > 0 ? startedAtMs + runtime.timeoutSec * 1000 : null;
-  return { runtime, cwd, paperclipEnv, childEnv, seeded, skills, deadlineMs, policy, profile };
+  return { runtime, cwd, paperclipEnv, childEnv, seeded, skills, deadlineMs, policy, profile, builtinSkillDirs };
 }
 /** pi-local execute.ts 574-635 (system prompt part). */
 async function buildSystemPrompt(ctx: AdapterExecutionContext, runtime: PrimeRuntimeConfig, cwd: string): Promise<SystemPrompt> {
@@ -362,14 +371,35 @@ async function reportGovernedRun(ctx: AdapterExecutionContext, result: AdapterEx
   const removedAtEnd = settingsCheck?.removedKeys ?? [];
   if (removedAtEnd.length > 0) await ctx.onLog("stdout", `[paperclip] settings.json: removed keys the run added that are not allowed: ${removedAtEnd.join(", ")}\n`);
   let featureProfile: Record<string, unknown>;
+  let workspaceFile: string | null = null;
   try {
-    const report = await finishGovernedRun(governed, [...new Set([...removedAtStart, ...removedAtEnd])]);
-    for (const warning of report.warnings) await ctx.onLog("stdout", `[paperclip] warning: ${warning}\n`);
-    featureProfile = { ...report };
+    const finished = await finishGovernedRun(governed, [...new Set([...removedAtStart, ...removedAtEnd])]);
+    const logged = new Set(governed.live.warnings); // item 10's session ends were logged when they happened
+    for (const warning of finished.report.warnings) if (!logged.has(warning)) await ctx.onLog("stdout", `[paperclip] warning: ${warning}\n`);
+    featureProfile = { ...finished.report };
+    workspaceFile = finished.workspaceFile;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     await ctx.onLog("stdout", `[paperclip] warning: the governed-v1 run report failed: ${message}\n`);
     featureProfile = { profile: governed.profile.profile, reportError: message };
   }
-  return { ...result, resultJson: { ...(result.resultJson ?? {}), featureProfile } };
+  const reported = { ...result, resultJson: { ...(result.resultJson ?? {}), featureProfile } };
+  if (!workspaceFile) return reported;
+  // §2.2 item 10: the shared workspace file was missing or changed; it is restored. This alone returns no clearSession,
+  // because another agent's run in the same cwd can cause it (G3 item 3 exception). A policy failure keeps its clearSession.
+  const message = `The workspace file ${path.join(governed.cwd, ".prime", "agent", "settings.json")} was ${workspaceFile} at run end; it was restored.`;
+  await ctx.onLog("stdout", `[paperclip] ${message}\n`);
+  const { sessionId: _id, sessionParams: _params, sessionDisplayId: _display, ...rest } = reported;
+  const earlier = reported.errorMeta?.policyFailures as string[] | undefined;
+  if (earlier) {
+    return { ...rest, errorMessage: `${reported.errorMessage ?? ""} ${message}`.trim(),
+      errorMeta: { ...reported.errorMeta, policyFailures: [...earlier, "prime_settings_tampered"] } };
+  }
+  return {
+    ...rest, exitCode: reported.exitCode === 0 || reported.exitCode === null ? 1 : reported.exitCode, errorCode: "prime_settings_tampered",
+    errorMessage: [message, ...(reported.errorCode ? [`Run result before the checks: ${reported.errorCode}${reported.errorMessage ? ` (${reported.errorMessage})` : ""}.`] : [])].join(" "),
+    errorMeta: { ...reported.errorMeta, primeErrorCode: "prime_settings_tampered", policyFailures: ["prime_settings_tampered"],
+      runErrorCode: reported.errorCode ?? null, runErrorMessage: reported.errorMessage ?? null },
+    clearSession: false,
+  };
 }

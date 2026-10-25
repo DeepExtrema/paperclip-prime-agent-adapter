@@ -50,7 +50,7 @@ export function resolvePrimeFeatureProfile(
   return { profile: PRIME_FEATURE_PROFILE, maxSubagentsPerRun: parsed, rlmMaxDepth: input.rlmMaxDepth ?? DEFAULT_RLM_MAX_DEPTH };
 }
 
-/** Item 1: whole top-level values, written before each run and checked after it. Item 10 adds skills and enableBuiltinSkills. */
+/** Items 1 and 10: whole top-level values, written before each run and checked after it. */
 export function primeGovernedManagedKeys(profile: PrimeFeatureProfile): Record<string, unknown> {
   return {
     harnessRefinements: true,
@@ -60,5 +60,7 @@ export function primeGovernedManagedKeys(profile: PrimeFeatureProfile): Record<s
     retry: { provider: { waitForUsage: { enabled: false, pauseUntilReset: false } } },
     agentTraces: { enabled: false },
     telemetry: { enabled: false },
+    skills: ["!**"], // item 10: drops the agent dir's skills, $HOME/.agents/skills/ and settings skill paths
+    enableBuiltinSkills: false, // item 10: the allowlisted built-ins come by path in the create config
   };
 }

@@ -431,5 +431,7 @@ export const PRIME_RESULT_ERROR_CODES = [
   "prime_subagent_limit_exceeded",
   /** TAI-273 §4.3 item 2: the saved session's lease is held by another Prime process. No session fields, no clearSession. */
   "prime_session_busy",
+  /** TAI-273 §2.2 item 10: the parent's skill list is wrong (before any prompt), or a session ended for its skills could not be ended or ran again. */
+  "prime_skill_list_invalid",
 ] as const;
 export type PrimeResultErrorCode = (typeof PRIME_RESULT_ERROR_CODES)[number];

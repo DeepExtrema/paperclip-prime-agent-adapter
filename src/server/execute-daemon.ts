@@ -12,7 +12,8 @@ import { emitPrimeMeta, type PreparedRun, type SystemPrompt } from "./execute.js
 import type { ForeignGoal, GovernedRunState } from "./governed-run.js";
 import { notePrimeChild, notePrimeParent, type PrimeAuditSources } from "./model-policy.js";
 import {isPrimeUnknownSessionError, parsePrimeJsonl, primeProviderErrorCode} from "./parse.js";
-import { PrimeSessionTracker, readPrimeRosterRow, type PrimeTrackerViolation } from "./session-cap.js";
+import { PrimeSessionTracker, type PrimeTrackerViolation } from "./session-cap.js";
+import { checkPrimeSkillList } from "./skill-list.js";
 
 export type PrimeDaemonErrorCode =|"prime_daemon_start_failed"|"prime_daemon_socket_unsafe"|
   "prime_daemon_protocol_error"|"prime_daemon_closed"|"prime_daemon_request_timeout";
@@ -376,7 +377,7 @@ export async function startDaemon(ctx: AdapterExecutionContext, prep: PreparedRu
     return { pid: child.pid!, socketPath, get stderrTail() { return stderrTail; }, client, workers, stopDaemon };
   } catch (err) { await stopDaemon(); throw err; }
 }
-type Stage = "create_failed" | "prompt_failed" | "completed" | "closed" | "timed_out" | "cancelled" | "policy_failed" | "session_busy";
+type Stage = "create_failed" | "prompt_failed" | "completed" | "closed" | "timed_out" | "cancelled" | "policy_failed" | "session_busy" | "skill_list_failed";
 type StatsDelta = { input: number; output: number; cacheRead: number; cacheWrite: number; total: number; cost: number };
 type SessionSummary = { activeSessionId: string; sessionId: string; sessionFile: string; provider: string | null; model: string | null; thinkingLevel: string | null };
 type Outcome = {
@@ -418,7 +419,7 @@ function createConfig(prep: PreparedRun, native: PrimeNativeConfig, system: Syst
     cwd, agentDir: runtime.agentDir.agentDir, sessionDir: runtime.agentDir.sessionDir, provider: runtime.provider, model: runtime.model,
     ...set("thinking", runtime.thinking),
     appendSystemPrompt: [system.text, runtime.appendSystemPrompt ?? ""].filter((text) => text.trim().length > 0),
-    skills: prep.skills.skillDirs,
+    skills: [...prep.skills.skillDirs, ...prep.builtinSkillDirs], // TAI-273 §2.2 item 10: governed-v1 adds the allowlisted built-ins
     ...(runtime.noContextFiles ? { noContextFiles: true } : {}),
     ...(a ? { autonomous: { enabled: true, ...set("maxTurns", a.maxTurns), ...set("maxTokens", a.maxTokens), ...set("maxContinuations", a.maxContinuations),
       ...set("timeoutMs", a.timeoutMs), gates: { commands: a.gates.commands, ...set("maxRetries", a.gates.maxRetries), ...set("timeoutMs", a.gates.timeoutMs) } } } : {}),
@@ -590,6 +591,16 @@ async function runAttempt(
         await must({type : "set_thinking_level", level : runtime.thinking});
       if (native.rlmMaxDepth !== null) await must({type : "set_rlm_max_depth", maxDepth : native.rlmMaxDepth});
     };
+    const explicitDirs = [...prep.skills.skillDirs, ...prep.builtinSkillDirs];
+    // TAI-273 §2.2 item 10: the parent's own skill list, before any prompt (and again for item 7's fresh session).
+    const checkParent = async (summary: SessionSummary): Promise<string | null> => {
+      if (!governed) return null;
+      const check = await checkPrimeSkillList(client, summary.activeSessionId, explicitDirs, true);
+      if (!check.ok) return `Prime session ${summary.sessionId} skill list check failed: ${check.reason}`;
+      governed.live.skillDiscovery = "off";
+      governed.live.contextFiles = check.contextFiles;
+      return null;
+    };
     let first = await createSession(resumeSessionFile);
     let resumed = resumeSessionFile !== null;
     if ("error" in first && resumeSessionFile) {
@@ -610,6 +621,11 @@ async function runAttempt(
     if ("error" in first) return await outcome("create_failed", first.error);
     session = first;
     await setUp(session);
+    const parentProblem = await checkParent(session);
+    if (parentProblem) {
+      emit(`[paperclip] ${parentProblem}\n`);
+      return await outcome("skill_list_failed", parentProblem, { session: null });
+    }
     if (foreign && governed) {
       const record: ForeignGoal = { goalId: str(foreign.goalId), objective: String(foreign.objective ?? "").slice(0, 200), status: String(foreign.status), action: "cleared" };
       governed.live.foreignGoals.push(record);
@@ -625,6 +641,11 @@ async function runAttempt(
         session = fresh;
         await setUp(session);
         resumed = false;
+        const freshProblem = await checkParent(session);
+        if (freshProblem) {
+          emit(`[paperclip] ${freshProblem}\n`);
+          return await outcome("skill_list_failed", freshProblem, { session: null });
+        }
       }
     }
     const sid = session.activeSessionId;
@@ -655,6 +676,8 @@ async function runAttempt(
           if (row.workerPid !== null) daemon.workers.add(row.workerPid);
           if (row.sessionId !== parentRef.sessionId) notePrimeChild(sources, row.activeSessionId, { sessionFile: row.sessionFile, depth: row.depth });
         },
+        checkSession: (row) => checkPrimeSkillList(client, row.activeSessionId, explicitDirs, false),
+        onWarning: (text) => governed.live.warnings.push(text),
       });
       await tracker.start();
     }
@@ -754,6 +777,7 @@ async function runAttempt(
     if (governed && tracker) {
       governed.live.sessions = tracker.sessions;
       governed.live.sessionsEnded = tracker.sessionsEnded;
+      governed.live.sessionSkillChecks = tracker.sessionSkillChecks;
     }
   }
 }
@@ -777,6 +801,8 @@ function mapResult(o: Outcome, prep: PreparedRun, daemon: RunDaemon, clearSessio
   switch (o.stage) {
     case "policy_failed": return fail(o.violation!.code, o.violation!.message);
     case "session_busy": return { ...fail("prime_session_busy", o.error ?? "The Prime session is held by another process."),
+      executionRecovery: { kind: "bootstrap", providerWorkStarted: false } };
+    case "skill_list_failed": return { ...fail("prime_skill_list_invalid", o.error ?? "The Prime skill list check failed."),
       executionRecovery: { kind: "bootstrap", providerWorkStarted: false } };
     case "timed_out": return { ...fail("prime_run_timeout", `Timed out after ${runtime.timeoutSec}s${o.error ? `: ${o.error}` : ""}`), exitCode: null, timedOut: true };
     case "cancelled": return fail("prime_run_cancelled", "Run cancelled.");

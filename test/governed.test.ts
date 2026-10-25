@@ -1,4 +1,4 @@
-// TAI-273 plan rev 7 §2.2 (G6): featureProfile "governed-v1", items 1-9 and the model-audit fix. Items 10-12 are separate.
+// TAI-273 plan rev 9 §2.2 (G6): featureProfile "governed-v1", items 1-10 and the model-audit fix.
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
@@ -10,6 +10,9 @@ import { execute } from "../src/server/execute.js";
 import { resolvePrimeFeatureProfile } from "../src/server/feature-profile.js";
 
 const FAKE = fileURLToPath(new URL("./fake-prime-daemon.mjs", import.meta.url));
+/** The fake's "release" dir is its own dir, so the built-ins are <test>/skills/<name> (§2.2 item 10). */
+const BUILTINS = ["agent-message", "agent-observe", "attach-image", "compact", "edit", "refine"].map((name) => path.join(path.dirname(FAKE), "skills", name));
+const WORKSPACE_SETTINGS = '{"skills":["!**"]}';
 const fixture = (name: string) => fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url));
 const MODEL = "anthropic/claude-haiku-4-5";
 const KEY = "sk-ant-api03-FIXTURE-governed-not-real";
@@ -90,14 +93,15 @@ describe("item 1: managed keys, env and depth", () => {
     expect(settings()).toMatchObject({
       harnessRefinements: true, autoRefine: { enabled: false }, factory: { enabled: false }, rlmMaxDepth: 1,
       retry: { provider: { waitForUsage: { enabled: false, pauseUntilReset: false } } }, agentTraces: { enabled: false }, telemetry: { enabled: false },
-      allowedModels: [MODEL],
+      allowedModels: [MODEL], skills: ["!**"], enableBuiltinSkills: false,
     });
+    expect(commands().find((c) => c.type === "create")).toMatchObject({ config: { skills: BUILTINS } });
     expect(commands()).toContainEqual(expect.objectContaining({ type: "set_rlm_max_depth", maxDepth: 1 }));
     const env = records().find((r) => r.kind === "start")!.env!;
     expect([env.DO_NOT_TRACK, env.PRIME_AGENT_TELEMETRY]).toEqual(["1", "0"]);
     expect(env).not.toHaveProperty("ANTHROPIC_BASE_URL");
     expect(env).not.toHaveProperty("ANTHROPIC_API_KEY");
-    expect(report).toMatchObject({ profile: "governed-v1", maxSubagentsPerRun: 2, sessions: 0, sessionsEnded: [], skillDiscovery: "on",
+    expect(report).toMatchObject({ profile: "governed-v1", maxSubagentsPerRun: 2, sessions: 0, sessionsEnded: [], skillDiscovery: "off", sessionSkillChecks: 0,
       settingsKeysRemoved: [], contextFilesDisabled: [], projectConfigDisabled: [], agentDirDisabled: [], foreignGoals: [],
       harnessEntriesDisabled: [], agentSkills: [], agentSkillsDisabled: [], scheduledJobsDisabled: 0, scheduledJobsCreated: 0,
       cachesCleared: [], modelCatalog: null, warnings: [] });
@@ -144,16 +148,24 @@ describe("item 6: context files and the workspace's .prime/agent/", () => {
     expect(report.projectConfigDisabled).toEqual([
       { path: ".prime/agent/SYSTEM.md", sha256: sha("replace") }, { path: ".prime/agent/settings.json", sha256: sha('{"packages":["x"]}') },
     ]);
-    expect(existsSync(path.join(ws(), ".prime", "agent"))).toBe(false);
-    expect(existsSync(path.join(ws(), ".prime", "agent.disabled-run-1", "SYSTEM.md"))).toBe(true);
+    // Rev 8: the dir stays; every entry but the managed settings.json moves, and a different settings.json is copied aside, then replaced.
+    expect(readFileSync(path.join(ws(), ".prime", "agent", "settings.json"), "utf8")).toBe(WORKSPACE_SETTINGS);
+    expect(existsSync(path.join(ws(), ".prime", "agent", "SYSTEM.md"))).toBe(false);
+    expect(readFileSync(path.join(ws(), ".prime", "agent.disabled-run-1", "SYSTEM.md"), "utf8")).toBe("replace");
+    expect(readFileSync(path.join(ws(), ".prime", "agent.disabled-run-1", "settings.json"), "utf8")).toBe('{"packages":["x"]}');
+    expect(report.warnings).toContain("workspace settings.json had other content; replaced: .prime/agent/settings.json");
   });
   it("moves a .prime link as a link and never touches its target", async () => {
     const outside = path.join(root, "outside");
     write(path.join(outside, "agent", "SYSTEM.md"), "x");
     symlinkSync(outside, path.join(ws(), ".prime"));
-    await run();
+    const { report } = await run();
     expect(readlinkSync(path.join(ws(), ".prime.disabled-run-1"))).toBe(outside);
     expect(readFileSync(path.join(outside, "agent", "SYSTEM.md"), "utf8")).toBe("x");
+    expect(existsSync(path.join(outside, "agent", "settings.json"))).toBe(false);
+    expect(readFileSync(path.join(ws(), ".prime", "agent", "settings.json"), "utf8")).toBe(WORKSPACE_SETTINGS);
+    expect(report.projectConfigDisabled).toEqual([{ path: ".prime", sha256: null }]);
+    expect(report.warnings).toContain("workspace .prime was a symlink; moved aside");
   });
   it("reports files the run creates, and warns on a changed workspace AGENTS.md and on every parent-dir context file", async () => {
     write(path.join(ws(), "AGENTS.md"), "v1");
@@ -241,8 +253,8 @@ describe("item 2: sessions per run, keyed by sessionId", () => {
     expect(types()).toContain("roster_subscribe");
     expect(commands().filter((c) => c.type === "kill")).toHaveLength(1);
     expect(report.sessions).toBe(2);
-    expect(report.sessionsEnded).toHaveLength(1);
-    expect(log).toContain(`[paperclip] session limit 1 reached; ended session ${report.sessionsEnded[0]}`);
+    expect(report.sessionsEnded).toEqual([{ sessionId: expect.any(String), depth: 0, reason: "limit" }]);
+    expect(log).toContain(`[paperclip] session limit 1 reached; ended session ${report.sessionsEnded[0].sessionId}`);
     const audit = (result.resultJson as { modelAudit: { actors: Array<{ depth: number | null }> } }).modelAudit;
     expect(audit.actors.map((actor) => actor.depth).sort()).toEqual([0, 0, 1]);
   });
@@ -331,9 +343,87 @@ describe("result shape", () => {
     expect(Object.keys((governed.resultJson as { featureProfile: object }).featureProfile).sort()).toEqual([
       "agentDirDisabled", "agentSkills", "agentSkillsDisabled", "cachesCleared", "contextFilesCreated", "contextFilesDisabled", "foreignGoals",
       "harnessBytes", "harnessEntriesDisabled", "harnessFingerprint", "maxSubagentsPerRun", "modelCatalog", "profile", "projectConfigCreated",
-      "projectConfigDisabled", "refinementEvents", "scheduledJobsCreated", "scheduledJobsDisabled", "sessions", "sessionsEnded", "settingsKeysRemoved",
-      "skillDiscovery", "warnings", "workspaceContextFiles",
+      "projectConfigDisabled", "refinementEvents", "scheduledJobsCreated", "scheduledJobsDisabled", "sessionSkillChecks", "sessions", "sessionsEnded",
+      "settingsKeysRemoved", "skillDiscovery", "warnings", "workspaceContextFiles",
     ]);
     expect(lstatSync(path.join(agentDir(), ".paperclip-disabled")).isDirectory()).toBe(true);
+  });
+});
+
+describe("item 10: the skill list, in the parent and in every other session", () => {
+  const workspaceFile = () => path.join(ws(), ".prime", "agent", "settings.json");
+  it("writes the workspace file with exact bytes and keeps it, untouched, between runs", async () => {
+    await run();
+    expect(readFileSync(workspaceFile(), "utf8")).toBe(WORKSPACE_SETTINGS);
+    const before = lstatSync(workspaceFile());
+    const second = await run({ runId: "run-2" });
+    expect(second.result.errorCode).toBeNull();
+    expect(lstatSync(workspaceFile()).ino).toBe(before.ino);
+    expect(second.report.projectConfigCreated).toEqual([]);
+  });
+  it("passes goal by path only when adapterConfig.goal is set", async () => {
+    await run({ config: { goal: "Ship it" } });
+    expect(commands().find((c) => c.type === "create")).toMatchObject({ config: { skills: [...BUILTINS, path.join(path.dirname(FAKE), "skills", "goal")] } });
+  });
+  it("fails the run before any prompt when the parent lists a skill that is not on the list (a daemon that ignores the settings)", async () => {
+    const found = path.join(agentDir(), "skills", "found");
+    const { result, log } = await run({ env: { FAKE_DAEMON_FOUND_SKILLS: JSON.stringify([found]) } });
+    expect(result).toMatchObject({ errorCode: "prime_skill_list_invalid", clearSession: false, executionRecovery: { kind: "bootstrap", providerWorkStarted: false } });
+    expect(result.sessionParams).toBeUndefined();
+    expect(result.errorMessage).toContain(found);
+    expect(types()).not.toContain("prompt_and_wait");
+    expect(log).toContain("skill list check failed");
+  });
+  it("fails the parent check when the snapshot cannot be read, or an explicit skill is missing", async () => {
+    expect((await run({ env: { FAKE_DAEMON_SNAPSHOT_FAILS: "1" } })).result.errorCode).toBe("prime_skill_list_invalid");
+  });
+  it("checks every other session and ends one that found a skill; the run goes on", async () => {
+    const found = "/home/someone/.agents/skills/omarchy";
+    const { result, report, log } = await run({ env: { FAKE_DAEMON_SPAWN: "[0, 1]", FAKE_DAEMON_PROMPT_DELAY_MS: "800", FAKE_DAEMON_CHILD_SKILLS: JSON.stringify([found]) } });
+    expect(result).toMatchObject({ exitCode: 0, errorCode: null });
+    expect(report.sessionSkillChecks).toBe(2);
+    expect(report.sessionsEnded).toEqual([
+      { sessionId: expect.any(String), depth: 0, reason: "skill_list", skills: [found] },
+      { sessionId: expect.any(String), depth: 1, reason: "skill_list", skills: [found] },
+    ]);
+    expect(commands().filter((c) => c.type === "get_resource_snapshot").map((c) => c.activeSessionId)).toHaveLength(3);
+    expect(log).toContain(`[paperclip] warning: session ${report.sessionsEnded[0].sessionId} (depth 0) loaded skills not on the list: ${found}; ended`);
+    expect(report.warnings).toContain(`session ${report.sessionsEnded[0].sessionId} (depth 0) loaded skills not on the list: ${found}; ended`);
+    expect(log.split(`loaded skills not on the list: ${found}`).length - 1).toBe(2); // logged once each, not again at run end
+  });
+  it("lets a session with no skills run, and counts its check", async () => {
+    const { result, report } = await run({ env: { FAKE_DAEMON_SPAWN: "[1]", FAKE_DAEMON_PROMPT_DELAY_MS: "500" } });
+    expect([result.errorCode, report.sessionSkillChecks, report.sessionsEnded]).toEqual([null, 1, []]);
+  });
+  it("fails with prime_skill_list_invalid when a session ended for its skills runs again", async () => {
+    const { result } = await run({ env: { FAKE_DAEMON_SPAWN: "[1]", FAKE_DAEMON_PROMPT_DELAY_MS: "800", FAKE_DAEMON_CHILD_SKILLS: '["/x/skills/found"]', FAKE_DAEMON_WAKE_ENDED_MS: "100" } });
+    expect(result).toMatchObject({ errorCode: "prime_skill_list_invalid", clearSession: false });
+  });
+  it("restores a workspace file the run deleted, and fails with prime_settings_tampered without clearSession", async () => {
+    const { result, log, report } = await run({ env: { FAKE_DAEMON_REMOVE_FILES: JSON.stringify([path.join(ws(), ".prime")]) } });
+    expect(result).toMatchObject({ errorCode: "prime_settings_tampered", clearSession: false, errorMeta: { runErrorCode: null } });
+    expect(result.sessionParams).toBeUndefined();
+    expect(readFileSync(workspaceFile(), "utf8")).toBe(WORKSPACE_SETTINGS);
+    expect(log).toContain(`The workspace file ${workspaceFile()} was missing at run end; it was restored.`);
+    expect(report.warnings).toContain(`workspace settings.json was missing at run end; restored: ${workspaceFile()}`);
+  });
+  it("restores through no symlink: a .prime link put back during the run is moved aside first (TAI-339 change 2)", async () => {
+    const shared = path.join(root, "shared");
+    mkdirSync(path.join(shared, "agent"), { recursive: true });
+    const links = JSON.stringify({ [path.join(ws(), ".prime")]: shared });
+    const { result, report } = await run({ env: { FAKE_DAEMON_REMOVE_FILES: JSON.stringify([path.join(ws(), ".prime")]), FAKE_DAEMON_LINKS: links } });
+    expect(result.errorCode).toBe("prime_settings_tampered");
+    expect(existsSync(path.join(shared, "agent", "settings.json"))).toBe(false);
+    expect(lstatSync(path.join(ws(), ".prime")).isDirectory()).toBe(true);
+    expect(readlinkSync(path.join(ws(), ".prime.disabled-run-1-end"))).toBe(shared);
+    expect(report.projectConfigCreated).toEqual([{ path: ".prime", sha256: null }]);
+    expect(report.warnings).toContain("workspace .prime was a symlink; moved aside");
+    expect(readFileSync(workspaceFile(), "utf8")).toBe(WORKSPACE_SETTINGS);
+  });
+  it("keeps clearSession: true when the agent-dir settings also failed", async () => {
+    const { result } = await run({ env: { FAKE_DAEMON_REMOVE_FILES: JSON.stringify([path.join(ws(), ".prime")]),
+      FAKE_DAEMON_EDIT_SETTINGS: JSON.stringify({ autoRefine: { enabled: true } }) } });
+    expect(result).toMatchObject({ errorCode: "prime_settings_tampered", clearSession: true,
+      errorMeta: { policyFailures: ["prime_settings_tampered", "prime_settings_tampered"] } });
   });
 });

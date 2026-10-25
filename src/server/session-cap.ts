@@ -1,5 +1,7 @@
-// TAI-273 plan rev 7 §2.2 item 2: the per-run session cap, keyed by sessionId, and the item 1 isQuotaParked backstop.
+// TAI-273 plan rev 8 §2.2 item 2: the per-run session cap, keyed by sessionId, and the item 1 isQuotaParked backstop.
+// Item 10: every session under the cap gets the skill-list check; one that fails it is ended, and the run goes on.
 // Sessions are learned from roster_subscribe (roster_update events), rlm_child_update events and `list` (N0 items 3-5).
+import type { SessionEnded } from "./governed-run.js";
 
 export interface PrimeRosterRow {
   activeSessionId: string;
@@ -18,7 +20,8 @@ type DaemonAnswer = { success: boolean; data?: unknown; error?: string };
 export interface PrimeTrackerClient {
   request(command: Record<string, unknown> & { type: string }, timeoutMs: number | null): Promise<DaemonAnswer>;
 }
-export interface PrimeTrackerViolation { code: "prime_subagent_limit_exceeded" | "prime_provider_quota"; message: string }
+export interface PrimeTrackerViolation { code: "prime_subagent_limit_exceeded" | "prime_provider_quota" | "prime_skill_list_invalid"; message: string }
+export type PrimeSessionCheck = (row: PrimeRosterRow) => Promise<{ ok: boolean; notAllowed: string[]; reason: string | null }>;
 
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const str = (value: unknown) => (typeof value === "string" && value.length > 0 ? value : null);
@@ -42,12 +45,14 @@ export function readPrimeRosterRow(value: unknown): PrimeRosterRow | null {
   };
 }
 
-type Ended = { activeSessionId: string; confirmed: boolean };
+type Ended = { activeSessionId: string; confirmed: boolean; reason: SessionEnded["reason"] };
+const codeFor = (reason: SessionEnded["reason"]) => (reason === "limit" ? "prime_subagent_limit_exceeded" : "prime_skill_list_invalid");
 
 export class PrimeSessionTracker {
   private readonly seen = new Set<string>();
   private readonly ended = new Map<string, Ended>();
-  private readonly endedOrder: string[] = [];
+  private readonly endedOrder: SessionEnded[] = [];
+  private checks = 0;
   private chain: Promise<void> = Promise.resolve();
   private poll: NodeJS.Timeout | null = null;
   private listing: Promise<void> | null = null;
@@ -63,6 +68,9 @@ export class PrimeSessionTracker {
     onLog: (line: string) => void;
     /** Every row seen (model audit, worker pids). */
     onRow: (row: PrimeRosterRow) => void;
+    /** Item 10: the skill-list check for a session under the cap. */
+    checkSession?: PrimeSessionCheck;
+    onWarning?: (text: string) => void;
   }) {}
 
   /** A session this tracker ended (by its activeSessionId at the time): the parent's wait for it is over. */
@@ -72,7 +80,9 @@ export class PrimeSessionTracker {
 
   /** Sessions other than the parent seen in this run, finished ones included. */
   get sessions(): number { return this.seen.size; }
-  get sessionsEnded(): string[] { return [...this.endedOrder]; }
+  get sessionsEnded(): SessionEnded[] { return this.endedOrder.map((entry) => ({ ...entry })); }
+  /** Item 10: sessions other than the parent whose skill list was checked. */
+  get sessionSkillChecks(): number { return this.checks; }
 
   /** Subscribes to roster updates; on refusal, logs one line and lists every 5 s instead. */
   async start(): Promise<void> {
@@ -107,13 +117,14 @@ export class PrimeSessionTracker {
       const ended = this.ended.get(row.sessionId);
       if (ended) {
         if (ended.confirmed && (row.activeSessionId !== ended.activeSessionId || row.active)) {
-          this.fail({ code: "prime_subagent_limit_exceeded", message: `Ended session ${row.sessionId} was seen running again (active session ${row.activeSessionId}).` });
+          this.fail({ code: codeFor(ended.reason), message: `Ended session ${row.sessionId} was seen running again (active session ${row.activeSessionId}).` });
         }
         continue;
       }
       if (this.seen.has(row.sessionId)) continue;
       this.seen.add(row.sessionId);
-      if (this.seen.size > this.options.cap) this.end(row);
+      if (this.seen.size > this.options.cap) this.end(row, "limit");
+      else if (this.options.checkSession) this.check(row);
     }
   }
 
@@ -136,16 +147,30 @@ export class PrimeSessionTracker {
     this.options.onViolation(violation);
   }
 
-  private end(row: PrimeRosterRow): void {
-    this.ended.set(row.sessionId, { activeSessionId: row.activeSessionId, confirmed: false });
-    this.endedOrder.push(row.sessionId);
-    this.chain = this.chain.then(() => this.endNow(row)).catch((err: unknown) => {
-      this.fail({ code: "prime_subagent_limit_exceeded", message: `Could not end session ${row.sessionId}: ${err instanceof Error ? err.message : String(err)}` });
+  private end(row: PrimeRosterRow, reason: SessionEnded["reason"], skills?: string[]): void {
+    this.ended.set(row.sessionId, { activeSessionId: row.activeSessionId, confirmed: false, reason });
+    this.endedOrder.push({ sessionId: row.sessionId, depth: row.depth, reason, ...(skills ? { skills } : {}) });
+    this.chain = this.chain.then(() => this.endNow(row, reason)).catch((err: unknown) => {
+      this.fail({ code: codeFor(reason), message: `Could not end session ${row.sessionId}: ${err instanceof Error ? err.message : String(err)}` });
+    });
+  }
+
+  /** Item 10: a skill off the list, or a snapshot that cannot be read, ends the session; the run goes on. */
+  private check(row: PrimeRosterRow): void {
+    this.chain = this.chain.then(async () => {
+      this.checks += 1;
+      const result = await this.options.checkSession!(row).catch((err: unknown) => ({ ok: false, notAllowed: [], reason: String(err) }));
+      if (result.ok) return;
+      const skills = result.notAllowed.length > 0 ? result.notAllowed : [result.reason ?? "the skill snapshot could not be read"];
+      const text = `session ${row.sessionId} (depth ${row.depth}) loaded skills not on the list: ${skills.join(", ")}; ended`;
+      this.options.onLog(`[paperclip] warning: ${text}\n`);
+      this.options.onWarning?.(text);
+      this.end(row, "skill_list", skills);
     });
   }
 
   /** N0 item 3: depth >= 1 needs cancel_rlm_child then delete_rlm_subagent; depth 0 needs kill. Then the roster must not list it. */
-  private async endNow(row: PrimeRosterRow): Promise<void> {
+  private async endNow(row: PrimeRosterRow, reason: SessionEnded["reason"]): Promise<void> {
     const { client } = this.options;
     const refuse = (why: string): never => { throw new Error(why); };
     if (row.depth >= 1) {
@@ -171,7 +196,7 @@ export class PrimeSessionTracker {
     if (!rows) refuse(`list failed: ${listed.error ?? "no error text"}`);
     if (rows!.some((value) => readPrimeRosterRow(value)?.sessionId === row.sessionId)) refuse("the roster still lists it");
     this.ended.get(row.sessionId)!.confirmed = true;
-    this.options.onLog(`[paperclip] session limit ${this.options.cap} reached; ended session ${row.sessionId}\n`);
+    if (reason === "limit") this.options.onLog(`[paperclip] session limit ${this.options.cap} reached; ended session ${row.sessionId}\n`);
     this.ingest(rows!);
   }
 }

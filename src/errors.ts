@@ -78,7 +78,9 @@ export type PrimePolicyErrorCode =
   /** TAI-273 §3.2: auth.json could not be deleted after a managed_subscription run. */
   | "prime_auth_cleanup_failed"
   /** TAI-273 §2.2: featureProfile or maxSubagentsPerRun is invalid, or governed-v1 lacks allowedModels, daemon or its credential modes. */
-  | "prime_feature_profile_invalid";
+  | "prime_feature_profile_invalid"
+  /** TAI-273 §2.2 item 10: the parent's skill list is not exactly the explicit list, or a session ended for its skills ran again. */
+  | "prime_skill_list_invalid";
 
 export class PrimePolicyError extends Error {
   readonly code: PrimePolicyErrorCode;

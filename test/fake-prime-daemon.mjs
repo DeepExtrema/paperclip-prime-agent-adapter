@@ -2,7 +2,7 @@
 // Test double for `prime-agent --mode daemon` 0.10.0 (WP9). It never calls a model.
 // Wire shapes copied from the 2026-10-18 probes (plans/WP9-daemon-runtime.md §0.3).
 // Also answers `--version` and `model list` like test/fake-prime-agent.mjs.
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { spawn } from "node:child_process";
 import path from "node:path";
@@ -119,6 +119,7 @@ function spawnSessions(parent) {
   parent.spawned = [];
   for (const depth of JSON.parse(env.FAKE_DAEMON_SPAWN ?? "[]")) {
     const child = create({ config: parent.config }, depth);
+    child.discovered = true; // a child or create_session session does its own discovery (N0 item 16, corrected)
     parent.spawned.push(child);
     child.depth = depth;
     child.running = true;
@@ -157,6 +158,16 @@ async function handle(socket, id, command) {
       const created = create(command);
       if (typeof created === "string") return fail(created);
       return ok(summary(created));
+    }
+    case "get_system_prompt": return ok({ systemPrompt: "fake system prompt" });
+    case "get_resource_snapshot": {
+      // TAI-273 §2.2 item 10 (N0 e31 shape): the parent lists its create config skills; another session only what it found.
+      const found = s.discovered ? JSON.parse(env.FAKE_DAEMON_CHILD_SKILLS ?? "[]")
+        : [...(s.config.skills ?? []), ...JSON.parse(env.FAKE_DAEMON_FOUND_SKILLS ?? "[]")];
+      if (env.FAKE_DAEMON_SNAPSHOT_FAILS === "1") return fail("snapshot unavailable");
+      const agents = path.join(s.cwd ?? "", "AGENTS.md");
+      return ok({ skills: found.map((dir) => ({ name: path.basename(dir), filePath: path.join(dir, "SKILL.md"), sourceInfo: { baseDir: dir } })),
+        contextFiles: existsSync(agents) ? [{ path: agents }] : [], prompts: [], themes: [], diagnostics: { skills: [], prompts: [], themes: [] } });
     }
     case "roster_subscribe":
       subscribers.add(socket);
@@ -212,6 +223,9 @@ async function handle(socket, id, command) {
       if (mode === "busy") return fail(PROCESSING);
       if (env.FAKE_DAEMON_EDIT_SETTINGS) mergeJson(path.join(s.config.agentDir, "settings.json"), JSON.parse(env.FAKE_DAEMON_EDIT_SETTINGS));
       if (env.FAKE_DAEMON_EDIT_AUTH) mergeJson(path.join(s.config.agentDir, "auth.json"), JSON.parse(env.FAKE_DAEMON_EDIT_AUTH));
+      // FAKE_DAEMON_REMOVE_FILES: paths removed by "the agent" during its turn (git clean, rm -rf); FAKE_DAEMON_LINKS: {path: target}.
+      for (const file of JSON.parse(env.FAKE_DAEMON_REMOVE_FILES ?? "[]")) rmSync(file, { recursive: true, force: true });
+      for (const [link, target] of Object.entries(JSON.parse(env.FAKE_DAEMON_LINKS ?? "{}"))) symlinkSync(target, link);
       // FAKE_DAEMON_WRITE_FILES: {absolute path: content}, written by "the agent" during its turn.
       for (const [file, content] of Object.entries(JSON.parse(env.FAKE_DAEMON_WRITE_FILES ?? "{}"))) {
         mkdirSync(path.dirname(file), { recursive: true });
