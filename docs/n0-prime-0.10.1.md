@@ -1,6 +1,6 @@
 # N0: Prime Agent 0.10.1 offline facts (TAI-273 plan rev 4, section 5 step 2)
 
-Recorded by Nexus on 2026-10-25 for TAI-323. Item 16 and contradictions 7 and 8 were added the same day, for the five N0 lines new in plan rev 5 (revision `38d350eb`). Item 17 holds addenda A and B from Axiom's checkpoint answer. Every fact below was observed on this host, offline, with the scripts in `scripts/n0/`, unless it is marked `unverified` or "from the binary's strings".
+Recorded by Nexus on 2026-10-25 for TAI-323. Item 16 and contradictions 7 and 8 were added the same day, for the five N0 lines new in plan rev 5 (revision `38d350eb`). Item 17 holds addenda A and B from Axiom's checkpoint answer, and item 18 holds addendum C (plan rev 9). Every fact below was observed on this host, offline, with the scripts in `scripts/n0/`, unless it is marked `unverified` or "from the binary's strings".
 
 ## How the facts were taken
 
@@ -191,6 +191,29 @@ Also seen, but written by the test itself and not by Prime: `models.json` (N0's 
 - **Prime caches both in the agent dir**: `<agentDir>/models/provider-model-catalog.v1.json` and `<agentDir>/mcp-service-catalog.v2.json`, each `{url, scope, fetchedAt, etag, payload}`. A daemon start reads the cache when the fetch fails: with a seeded cache, `get_model_catalog` listed the catalog's 1,209-model set, not the bundled fixtures.
 - **A catalog `baseUrl` did not redirect the anthropic provider** (e28, no `models.json`). In the cache, I changed `claude-opus-5-5`'s `baseUrl` to the fake server (`http://127.0.0.1:…`), to `https://n0-redirect.invalid` and to `https://api.anthropic.com/n0`. In all three runs, Prime **dropped that entry** from `get_model_catalog`. The turn went to the default endpoint (offline, so "Connection error."), and no request reached the fake server. A control that changed only the entry's `name` kept the entry with the new name. So for anthropic, the catalog can change model metadata (name, `reasoning`, thinking levels, limits, cost) but not the address, in these tests. Not tested: a catalog entry for a provider that has no built-in address, and a new provider name.
 - **The plugins catalog loaded nothing** (e29). With a seeded plugins cache, the session's tools (`python_repl` only) and its system prompt were the same as without it, apart from the session paths. No MCP server was started and nothing was installed.
+
+### 18. Addendum C (plan rev 9, section 5 step 2)
+
+**Steps 2 to 4 are answered by Sentinel's [TAI-339 `probe`](/TAI/issues/TAI-339#document-probe)** (`t2-catalog.mjs`), and are not repeated here. In short:
+- `get_model_catalog` needs a session ("malformed get_model_catalog command" without `activeSessionId`). It gives `provider`, `baseUrl` and `reasoning` per entry.
+- `model_catalog_changed` reaches a client that has sent `roster_subscribe`.
+- With the caches deleted, the catalog was ready 568 ms after daemon start, and 3.1 s with a 2.5 s proxy delay. With a 6 s delay, the fetch did not finish in 30 s, and the catalog had no Opus 5.5.
+- A session created before the fetch keeps `thinkingLevel: "off"` until a second `set_thinking_level`.
+- A seeded `anthropic/n0-probe` at the fake server sent nothing there. A new provider `n0probe` was refused ("Unknown provider").
+
+**Step 1: a fresh daemon resuming a parent with old children** (e32; `strace` is not installed on this host, so files come from `inotifywait` on `daemon-workers/` and processes from a `/proc` scan of daemon B's descendants every 100 ms). Daemon A had a parent, a finished depth-1 child, a finished `create_session` session and a busy depth-1 child. Daemon B, on a new socket path, then resumed A's parent with `create` and `sessionPath`. No prompt went to B.
+
+| A stopped by | Files in A's `daemon-workers/<id>/` that B opened | Writes, moves or deletes there | Processes B started | Roster 8 s after `create` | Requests at the fake |
+|---|---|---|---|---|---|
+| the adapter's stop (`shutdown`, then group `SIGKILL`) | none; B listed the dir only. A's dir then held writer locks and `supervisor-config` only. | none | one `prime-agent worker` and its `rlm.repl` kernel | the parent only | 0 |
+| a crash (`SIGKILL` of A and every worker group) | the four worker `<id>.json` files only; no `recovery.jsonl` and no `orphans.jsonl` | none | one `prime-agent worker` and its `rlm.repl` kernel | the parent only | 0 |
+
+So a fresh daemon adopts, stops, starts and resumes nothing from another daemon's dir, which is item 11's pass condition. **`daemon-workers/` stays on the keep-list.** This matches Sentinel's TAI-339 `t1` and `t3`, which also showed that a forged worker record with a live pid and socket is not contacted.
+
+**Step 5: persistent-shell records** (e33). A parent and a depth-1 child each ran `bash('sleep 600', persistent=True)`. `<agentDir>/persistent-shells/` then held one `<id>.json` and one `<id>.out` per shell. Each record is `{ id, pid, startId, command, startedAt, sessionId }`.
+- **Each record's `sessionId` equals that session's roster `sessionId`**: the parent's at depth 0 and the child's at depth 1.
+- Each `startId` equals `proc:<field 22 of /proc/<pid>/stat>`, and each pid leads its own process group.
+- Both shells were still running after an adapter-style stop (TAI-339 `t4`). The script then killed them.
 
 ## New facts the plan does not have
 
