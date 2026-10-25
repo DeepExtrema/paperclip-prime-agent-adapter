@@ -9,7 +9,7 @@ export interface PrimeFeatureProfile {
   maxSubagentsPerRun: number;
   /** adapterConfig.rlmMaxDepth, default 1 (item 1). */
   rlmMaxDepth: number;
-  /** adapterConfig.thinking, required (rev 11): item 12's step and the managed defaultThinkingLevel need it. "off" is allowed. */
+  /** adapterConfig.thinking, required (rev 11): item 12's step and the managed defaultThinkingLevel need it. Item 12 checks it against the catalog (rev 13). */
   thinking: string;
 }
 
@@ -46,7 +46,7 @@ export function resolvePrimeFeatureProfile(
   if (input.credentialMode !== "managed_subscription" && input.credentialMode !== "api_key") {
     invalid(`featureProfile "${PRIME_FEATURE_PROFILE}" needs credentialMode managed_subscription or api_key, never host_auth.`);
   }
-  if (input.thinking === null) invalid(`featureProfile "${PRIME_FEATURE_PROFILE}" needs adapterConfig.thinking ("off" is allowed).`);
+  if (input.thinking === null) invalid(`featureProfile "${PRIME_FEATURE_PROFILE}" needs adapterConfig.thinking, a level that every allowed model supports.`);
   const raw = config.maxSubagentsPerRun;
   const parsed = isUnset(raw) ? DEFAULT_MAX_SUBAGENTS : typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw.trim()) : Number.NaN;
   if (!Number.isInteger(parsed) || parsed < 1 || parsed > 8) invalid("adapterConfig.maxSubagentsPerRun must be an integer from 1 to 8.");

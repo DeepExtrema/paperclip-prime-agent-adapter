@@ -1,4 +1,4 @@
-// TAI-273 plan rev 10 §2.2 (G6): featureProfile "governed-v1", items 1-13 and the model-audit fix; TAI-324 round 1 (F1-F3, T1-T5).
+// TAI-273 plan rev 13 §2.2 (G6): featureProfile "governed-v1", items 1-13 and the model-audit fix; TAI-324 round 1 (F1-F3, T1-T5).
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
@@ -9,6 +9,7 @@ import type { AdapterExecutionContext, AdapterExecutionResult } from "@paperclip
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { execute } from "../src/server/execute.js";
 import { resolvePrimeFeatureProfile } from "../src/server/feature-profile.js";
+import { primeCatalogCheck, primeSupportedThinkingLevels } from "../src/server/model-catalog.js";
 
 const FAKE = fileURLToPath(new URL("./fake-prime-daemon.mjs", import.meta.url));
 /** The fake's "release" dir is its own dir, so the built-ins are <test>/skills/<name> (§2.2 item 10). */
@@ -509,15 +510,23 @@ describe("item 12: the model catalog and the parent's thinking level", () => {
     expect(types()).not.toContain("prompt_and_wait");
     expect(types().slice(types().indexOf("get_model_catalog"))).not.toContain("set_thinking_level");
   });
-  it("keeps prime_model_catalog_invalid when set_model clamps the level, puts the managed defaultThinkingLevel back and names it (rev 12)", async () => {
+  it("fails prime_settings_tampered with clearSession when set_model writes another defaultThinkingLevel and item 12 then fails (rev 13)", async () => {
     const { result, report, log } = await run({ env: { FAKE_DAEMON_SET_MODEL_CLAMP: "medium" } });
-    expect(result).toMatchObject(bootstrap);
-    expect(result.errorMeta?.policyFailures).toBeUndefined();
+    expect(result).toMatchObject({ errorCode: "prime_settings_tampered", clearSession: true,
+      errorMeta: { policyFailures: ["prime_settings_tampered"], runErrorCode: "prime_model_catalog_invalid" } });
+    expect(result.executionRecovery).toBeUndefined();
+    expect(result.sessionParams).toBeUndefined();
     expect(report.modelCatalog).toMatchObject({ ok: false, thinkingLevel: "medium", failure: 'thinking level is "medium", configured "high"' });
+    expect(log).toContain('[paperclip] Prime model catalog check failed: thinking level is "medium", configured "high"');
+    expect(log).toContain("[paperclip] settings.json managed keys changed during the run: defaultThinkingLevel.");
+    expect((result.resultJson as { settings: Record<string, unknown> }).settings).not.toHaveProperty("restoredBeforePrompt");
+    expect(report.warnings).toEqual([]);
+    // The next run start writes the managed value back before Prime starts (item 1), as for any tamper.
+    expect(settings()).toMatchObject({ defaultThinkingLevel: "medium" });
+    const next = await run({ runId: "run-2" });
+    expect(next.result.errorCode).toBeNull();
+    expect(JSON.parse(records().filter((r) => r.kind === "start")[1]!.settings!)).toMatchObject({ defaultThinkingLevel: "high" });
     expect(settings()).toMatchObject({ defaultThinkingLevel: "high" });
-    expect((result.resultJson as { settings: { restoredBeforePrompt: string[] } }).settings.restoredBeforePrompt).toEqual(["defaultThinkingLevel"]);
-    expect(log).toContain("[paperclip] warning: settings key defaultThinkingLevel changed before the first prompt; restored");
-    expect(report.warnings).toContain("settings key defaultThinkingLevel changed before the first prompt; restored");
   });
   it("sends no set_model without governed-v1 when create already shows the configured model (as on 1f8f816)", async () => {
     const { result } = await run({ config: { featureProfile: undefined } });
@@ -538,6 +547,75 @@ describe("item 12: the model catalog and the parent's thinking level", () => {
     const { result, report } = await run({ env: { FAKE_DAEMON_REFUSE: "roster_subscribe" } });
     expect(result.errorCode).toBeNull();
     expect(report.modelCatalog).toMatchObject({ ok: true, checks: 2, refreshesSeen: 0 });
+  });
+});
+
+describe("item 12: the thinking level is one that every allowed model supports (rev 13, TAI-343 change 2)", () => {
+  const OPUS = "anthropic/claude-opus-5-5";
+  /** Opus 5.5's real catalog entry (0.10.1 catalog copy from Sentry's TAI-324 rig; the same as set_model's answer in n02). */
+  const OPUS_ENTRY = { id: "claude-opus-5-5", name: "Claude Opus 5.5", api: "anthropic-messages", provider: "anthropic", baseUrl: "https://api.anthropic.com", reasoning: true,
+    thinkingLevelMap: { off: null, minimal: null, low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" },
+    input: ["text", "image"], cost: { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 }, contextWindow: 1000000, maxTokens: 128000 };
+  const opus = (thinking: string, env: Record<string, string> = {}) =>
+    run({ config: { model: OPUS, allowedModels: [OPUS], thinking }, env: { FAKE_DAEMON_CATALOG: JSON.stringify([OPUS_ENTRY]), ...env } });
+  const haiku = (over: Record<string, unknown>) => ({ provider: "anthropic", id: "claude-haiku-4-5", baseUrl: "https://api.anthropic.com", reasoning: true, ...over });
+  const failedBeforeSetModel = { errorCode: "prime_model_catalog_invalid", clearSession: false, executionRecovery: { kind: "bootstrap", providerWorkStarted: false } };
+  it("follows Prime's getSupportedThinkingLevels (0.7.1 models.ts:66-75)", () => {
+    expect(primeSupportedThinkingLevels(OPUS_ENTRY)).toEqual(["low", "medium", "high", "xhigh", "max"]);
+    expect(primeSupportedThinkingLevels(haiku({}))).toEqual(["off", "minimal", "low", "medium", "high"]);
+    expect(primeSupportedThinkingLevels(haiku({ thinkingLevelMap: { low: "low", xhigh: "xhigh" } }))).toEqual(["off", "minimal", "low", "medium", "high", "xhigh"]);
+    expect(primeSupportedThinkingLevels(haiku({ thinkingLevelMap: { high: null, max: null } }))).toEqual(["off", "minimal", "low", "medium"]);
+    expect(primeSupportedThinkingLevels(haiku({ reasoning: false, thinkingLevelMap: OPUS_ENTRY.thinkingLevelMap }))).toEqual(["off"]);
+    // An allowed model with reasoning: false never passes, at any level, off included; the wait goes on for it.
+    for (const level of ["off", "minimal", "low", "medium", "high", "xhigh", "max"]) {
+      expect(primeCatalogCheck({ models: [haiku({ reasoning: false })] }, [MODEL], level)).toEqual({ problem: `${MODEL} has no reasoning (thinking is ${level})`, wait: true });
+    }
+  });
+  it.each(["off", "minimal"])("fails thinking %s on Opus 5.5's real entry before the first prompt, with no set_model", async (level) => {
+    const { result, report, log } = await opus(level);
+    expect(result).toMatchObject(failedBeforeSetModel);
+    const failure = `thinking level ${level} is not supported by ${OPUS}; supported: low, medium, high, xhigh, max`;
+    expect(report.modelCatalog).toMatchObject({ ok: false, checks: 1, liveModel: null, failure });
+    expect(log).toContain(`[paperclip] Prime model catalog check failed: ${failure}\n`);
+    expect(types()).not.toContain("set_model");
+    expect(types()).not.toContain("prompt_and_wait");
+    expect(requests()).toEqual([]);
+  });
+  it.each(["low", "max"])("passes thinking %s on Opus 5.5's real entry", async (level) => {
+    const { result, report } = await opus(level);
+    expect(result).toMatchObject({ exitCode: 0, errorCode: null });
+    expect(report.modelCatalog).toMatchObject({ ok: true, thinkingLevel: level, liveModel: { provider: "anthropic", id: "claude-opus-5-5", baseUrl: "https://api.anthropic.com", reasoning: true } });
+    expect(requests().map((r) => r.thinking)).toEqual([level]);
+  });
+  it("passes high for a map without a high key and for an entry with no map; fails xhigh for a map without xhigh", async () => {
+    const noHigh = { off: null, minimal: null, low: "low", medium: "medium", xhigh: "xhigh", max: "max" };
+    const keyless = await run({ env: { FAKE_DAEMON_CATALOG: JSON.stringify([haiku({ thinkingLevelMap: noHigh })]) } });
+    expect(keyless.result.errorCode).toBeNull();
+    const mapless = await run({ runId: "run-2", env: { FAKE_DAEMON_CATALOG: JSON.stringify([haiku({})]) } });
+    expect(mapless.result.errorCode).toBeNull();
+    const noXhigh = await run({ runId: "run-3", config: { thinking: "xhigh" }, env: { FAKE_DAEMON_CATALOG: JSON.stringify([haiku({ thinkingLevelMap: { low: "low", high: "high", max: "max" } })]) } });
+    expect(noXhigh.result).toMatchObject(failedBeforeSetModel);
+    expect(noXhigh.report.modelCatalog.failure).toBe(`thinking level xhigh is not supported by ${MODEL}; supported: off, minimal, low, medium, high, max`);
+  });
+  it("never passes an allowed model with reasoning: false under thinking off", async () => {
+    const { result, report } = await run({ config: { thinking: "off" }, env: { FAKE_DAEMON_CATALOG: JSON.stringify([haiku({ reasoning: false })]) } });
+    expect(result).toMatchObject(failedBeforeSetModel);
+    expect(report.modelCatalog).toMatchObject({ ok: false, failure: `${MODEL} has no reasoning (thinking is off)` });
+    expect(report.modelCatalog.checks).toBeGreaterThanOrEqual(25);
+    expect(types()).not.toContain("set_model");
+  }, 30_000);
+  it("does not pass thinking off on the entry from before the fetch, and fails once the real entry lands", async () => {
+    const { result, report } = await opus("off", { FAKE_DAEMON_CATALOG_READY_MS: "1200" });
+    expect(result).toMatchObject(failedBeforeSetModel);
+    expect(report.modelCatalog.checks).toBeGreaterThan(1);
+    expect(report.modelCatalog.failure).toBe(`thinking level off is not supported by ${OPUS}; supported: low, medium, high, xhigh, max`);
+    expect(types()).not.toContain("set_model");
+  });
+  it("fails a set_model answer with reasoning: false under thinking off (no exception for off)", async () => {
+    const { result, report } = await run({ config: { thinking: "off" }, env: { FAKE_DAEMON_SET_MODEL_ENTRY: JSON.stringify(haiku({ reasoning: false })) } });
+    expect(result).toMatchObject(failedBeforeSetModel);
+    expect(report.modelCatalog.failure).toBe(`set_model answered ${MODEL} has no reasoning (thinking is off)`);
+    expect(types()).toContain("set_model");
   });
 });
 
