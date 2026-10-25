@@ -302,6 +302,8 @@ type RunDaemon = {
 function noteRosterChildren(sources: PrimeAuditSources | undefined, rows: unknown[]) {
   for (const row of rows) {
     if (!sources || !isObject(row) || typeof row.rlmDepth !== "number") continue;
+    const seen = str(row.sessionId);
+    if (seen) sources.seenSessionIds.add(seen); // §4.3 item 5, any depth
     const id = str(row.activeSessionId);
     if (!id) continue;
     if (row.rlmDepth <= 0 && (!sources.includeTopLevel || str(row.sessionId) === sources.parent?.sessionId)) continue;

@@ -235,6 +235,19 @@ async function handle(socket, id, command) {
       s.prompted = true;
       const mode = env.FAKE_DAEMON_PROMPT_MODE ?? "ok";
       if (mode === "busy") return fail(PROCESSING);
+      // FAKE_DAEMON_PERSISTENT_SHELL: a shell command started in its own session, recorded as Prime records
+      // bash(..., persistent=True) under <agentDir>/persistent-shells/<id>.json (N0 item 18).
+      if (env.FAKE_DAEMON_PERSISTENT_SHELL) {
+        const shell = spawn("sh", ["-c", env.FAKE_DAEMON_PERSISTENT_SHELL], { detached: true, stdio: "ignore" });
+        shell.unref();
+        const stat = readFileSync(`/proc/${shell.pid}/stat`, "utf8");
+        const dir = path.join(s.config.agentDir, "persistent-shells");
+        mkdirSync(dir, { recursive: true });
+        const shellId = `fakeshell${shell.pid}`;
+        writeFileSync(path.join(dir, `${shellId}.json`), JSON.stringify({ id: shellId, pid: shell.pid,
+          startId: `proc:${stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19]}`, command: env.FAKE_DAEMON_PERSISTENT_SHELL, sessionId: s.sessionId }));
+        record({ kind: "persistent_shell", pid: shell.pid, sessionId: s.sessionId });
+      }
       if (env.FAKE_DAEMON_CATALOG_REFRESH) {
         refreshed = JSON.parse(env.FAKE_DAEMON_CATALOG_REFRESH);
         for (const c of subscribers) send(c, { type: "model_catalog_changed" });

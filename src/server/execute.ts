@@ -23,6 +23,7 @@ import { primeGovernedManagedKeys, resolvePrimeFeatureProfile, type PrimeFeature
 import { finishGovernedRun, startGovernedRun, type GovernedRunState } from "./governed-run.js";
 import { finishPrimeManagedCredential, resolvePrimeManagedConnection, type PrimeManagedBinding } from "./managed-connection.js";
 import { primeBuiltinSkillDirs, primeReleaseDir } from "./skill-list.js";
+import { reapPersistentShells } from "./persistent-shells.js";
 import { assertPrimeModelListed, listPrimeModels } from "./models.js";
 import { isPrimeUnknownSessionError, parsePrimeJsonl, primeProviderErrorCode } from "./parse.js";
 import { assertPrimeCwdAllowed, buildPrimeChildEnv, resolvePrimeCommand, resolvePrimeRuntimeConfig, seedPrimeAgentDir } from "./runtime-config.js";
@@ -343,7 +344,8 @@ async function executeRun(ctx: AdapterExecutionContext, track: RunTrack): Promis
     settings = await preparePrimeSettings(prep.runtime.agentDir.agentDir, prep.policy, settingsNotes); // §9 items 1-2, before Prime starts
     if (settings?.removedKeys?.length) await ctx.onLog("stdout", `[paperclip] settings.json: removed keys that are not allowed: ${settings.removedKeys.join(", ")}\n`);
     // TAI-273 §2.2 items 4, 6, 8 and 9, before Prime starts.
-    if (prep.profile) governed = await startGovernedRun({ profile: prep.profile, agentDir: prep.runtime.agentDir.agentDir, cwd: prep.cwd, runId: ctx.runId });
+    if (prep.profile) governed = await startGovernedRun({ profile: prep.profile, agentDir: prep.runtime.agentDir.agentDir, cwd: prep.cwd, runId: ctx.runId,
+      onLog: (line) => ctx.onLog("stdout", line) });
   } catch (err) {
     await prep.skills.cleanup();
     return preflightFailure(err);
@@ -360,6 +362,18 @@ async function executeRun(ctx: AdapterExecutionContext, track: RunTrack): Promis
     else result = { exitCode: 1, signal: null, timedOut: false, errorCode: "prime_run_failed", errorMessage: err instanceof Error ? err.message : String(err), clearSession: false };
   } finally {
     await prep.skills.cleanup();
+    // TAI-273 §4.3 item 5: the Prime process is gone (daemon stopped, or print child exited); persistent shells end before any
+    // run-end check. Under governed-v1 every recorded shell; otherwise only shells of sessions this run saw.
+    const reaped = await reapPersistentShells(prep.runtime.agentDir.agentDir, {
+      when: "run_end", sessionIds: governed ? null : sources.seenSessionIds, onLog: (line) => ctx.onLog("stdout", line),
+    }).catch(async (err: unknown) => {
+      await ctx.onLog("stdout", `[paperclip] warning: the persistent-shell reap failed: ${err instanceof Error ? err.message : String(err)}\n`);
+      return { killed: [], warnings: [] };
+    });
+    if (governed) {
+      governed.persistentShellsKilled.push(...reaped.killed);
+      governed.startWarnings.push(...reaped.warnings);
+    }
   }
   // §9 items 3-5 run on every outcome: success, failure, cancel, timeout and uncertain.
   const finished = await finishPrimeRun(result, { policy: prep.policy, settings, credential: prep.runtime.credential, agentDir: prep.runtime.agentDir.agentDir, sources });

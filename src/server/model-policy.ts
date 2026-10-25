@@ -246,6 +246,8 @@ export interface PrimeAuditSources {
   children: Map<string, ActorInfo>;
   /** TAI-273 §2.2 item 2: with allowedModels set, depth-0 sessions other than the parent (rlm.create_session) are audited too. */
   includeTopLevel: boolean;
+  /** TAI-273 §4.3 item 5: every Prime sessionId seen in this run, any depth (the persistent-shell reap without governed-v1). */
+  seenSessionIds: Set<string>;
 }
 
 async function listSessionFiles(dir: string, into = new Map<string, FileStamp>()): Promise<Map<string, FileStamp>> {
@@ -262,19 +264,21 @@ async function listSessionFiles(dir: string, into = new Map<string, FileStamp>()
 
 export async function startPrimeAudit(sessionDir: string, options: { includeTopLevel?: boolean } = {}): Promise<PrimeAuditSources> {
   const snapshot = await listSessionFiles(sessionDir).catch(() => new Map<string, FileStamp>());
-  return { sessionDir, snapshot, parent: null, children: new Map(), includeTopLevel: options.includeTopLevel === true };
+  return { sessionDir, snapshot, parent: null, children: new Map(), includeTopLevel: options.includeTopLevel === true, seenSessionIds: new Set() };
 }
 
 const pick = <T>(next: T | null | undefined, previous: T | null): T | null => (next === undefined || next === null ? previous : next);
 
 export function notePrimeParent(sources: PrimeAuditSources, info: Partial<ActorInfo & { sessionId: string | null; prompted: boolean }>): void {
   const previous = sources.parent ?? { sessionId: null, sessionFile: null, depth: 0, tokens: null, prompted: false };
+  if (info.sessionId) sources.seenSessionIds.add(info.sessionId);
   sources.parent = { sessionId: pick(info.sessionId, previous.sessionId), sessionFile: pick(info.sessionFile, previous.sessionFile),
     depth: 0, tokens: pick(info.tokens, previous.tokens), prompted: info.prompted ?? previous.prompted };
 }
 
 export function notePrimeChild(sources: PrimeAuditSources, activeSessionId: string, info: Partial<ActorInfo>): void {
   const previous = sources.children.get(activeSessionId) ?? { sessionFile: null, depth: null, tokens: null };
+  if (info.sessionFile) sources.seenSessionIds.add(path.basename(info.sessionFile, ".jsonl"));
   sources.children.set(activeSessionId, { sessionFile: pick(info.sessionFile, previous.sessionFile),
     depth: pick(info.depth, previous.depth), tokens: pick(info.tokens, previous.tokens) });
 }

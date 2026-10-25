@@ -1,6 +1,7 @@
 // TAI-273 plan rev 9 §2.2 (G6): featureProfile "governed-v1", items 1-12 and the model-audit fix.
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -437,6 +438,74 @@ describe("item 11: the agent dir is an allowlist; the catalog caches are deleted
   });
 });
 
+describe("G3 item 5: persistent shells end with the run (TAI-340 change 1)", () => {
+  const started: number[] = [];
+  const procStat = (pid: number) => { try { const st = readFileSync(`/proc/${pid}/stat`, "utf8"); return st.slice(st.lastIndexOf(")") + 2).split(" "); } catch { return null; } };
+  const alive = (pid: number) => { const f = procStat(pid); return f !== null && f[0] !== "Z"; };
+  const members = (session: number) => readdirSync("/proc").filter((n) => /^\d+$/.test(n)).map(Number).filter((p) => { const f = procStat(p); return f !== null && f[0] !== "Z" && Number(f[3]) === session; });
+  /** A real shell in its own session, as bash(..., persistent=True) starts it, and its record. */
+  function shell(command: string, record: Record<string, unknown> = {}, file?: string) {
+    const child = spawn("sh", ["-c", command], { detached: true, stdio: "ignore" });
+    child.unref();
+    started.push(child.pid!);
+    const startId = `proc:${procStat(child.pid!)![19]}`;
+    write(file ?? path.join(agentDir(), "persistent-shells", `s${child.pid}.json`), JSON.stringify({ id: `s${child.pid}`, pid: child.pid, startId, sessionId: "old-session", ...record }));
+    return child.pid!;
+  }
+  const fromRecords = () => records().filter((r) => r.kind === "persistent_shell") as unknown as Array<{ pid: number; sessionId: string }>;
+  afterEach(() => {
+    for (const pid of [...started, ...fromRecords().map((r) => r.pid)]) { try { process.kill(-pid, "SIGKILL"); } catch {} for (const m of members(pid)) { try { process.kill(m, "SIGKILL"); } catch {} } }
+    started.length = 0;
+  });
+  it("ends a shell the run started, with its whole session (timeout moves its child to another group), before the run-end checks", async () => {
+    const marker = path.join(root, "late-writes");
+    const { result, report, log } = await run({ env: { FAKE_DAEMON_PERSISTENT_SHELL: `timeout 600 sh -c 'while true; do echo x >> ${marker}; sleep 0.05; done'` } });
+    const [rec] = fromRecords();
+    expect(result.errorCode).toBeNull();
+    expect(report.persistentShellsKilled).toEqual([{ shellId: `fakeshell${rec!.pid}`, sessionId: rec!.sessionId, pid: rec!.pid, when: "run_end", stopped: true }]);
+    expect(members(rec!.pid)).toEqual([]);
+    expect(log).toContain(`[paperclip] ended persistent shell fakeshell${rec!.pid} (pid ${rec!.pid}, session ${rec!.sessionId})`);
+    const size = statSync(marker).size;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(statSync(marker).size).toBe(size);
+  });
+  it("ends a shell left by an earlier run at run start, before item 11 moves persistent-shells/", async () => {
+    const pid = shell("sleep 600");
+    const { report } = await run();
+    expect(alive(pid)).toBe(false);
+    expect(report.persistentShellsKilled).toEqual([{ shellId: `s${pid}`, sessionId: "old-session", pid, when: "run_start", stopped: true }]);
+    expect(report.agentDirDisabled).toContainEqual({ name: "persistent-shells", kind: "dir", sha256: null });
+  });
+  it("sends no signal for another startId, a gone pid, a symlinked record or a bad pid", async () => {
+    const other = shell("sleep 600", { startId: "proc:1" });
+    const linked = shell("sleep 600", {}, path.join(root, "elsewhere.json"));
+    symlinkSync(path.join(root, "elsewhere.json"), path.join(agentDir(), "persistent-shells", "linked.json"));
+    write(path.join(agentDir(), "persistent-shells", "gone.json"), JSON.stringify({ id: "gone", pid: 4_000_000, startId: "proc:1" }));
+    write(path.join(agentDir(), "persistent-shells", "bad.json"), JSON.stringify({ id: "bad", pid: "1", startId: "proc:1" }));
+    const { report } = await run();
+    expect([alive(other), alive(linked)]).toEqual([true, true]);
+    expect(report.persistentShellsKilled).toEqual([]);
+  });
+  it("skips a persistent-shells dir that is a link, with a warning", async () => {
+    mkdirSync(path.join(root, "shells"));
+    mkdirSync(agentDir(), { recursive: true });
+    symlinkSync(path.join(root, "shells"), path.join(agentDir(), "persistent-shells"));
+    const { report, log } = await run();
+    expect(report.warnings).toContain(`${path.join(agentDir(), "persistent-shells")} is a symlink; persistent shells were not reaped`);
+    expect(log).toContain("[paperclip] warning:");
+  });
+  it("without governed-v1: ends only shells of this run's sessions, and has no run-start reap", async () => {
+    const config = { featureProfile: undefined };
+    const theirs = shell("sleep 600");
+    const { result, log } = await run({ config, env: { FAKE_DAEMON_PERSISTENT_SHELL: "sleep 600" } });
+    const [ours] = fromRecords();
+    expect(result.resultJson).not.toHaveProperty("featureProfile");
+    expect(alive(ours!.pid)).toBe(false);
+    expect(alive(theirs)).toBe(true);
+    expect(log).toContain(`[paperclip] ended persistent shell fakeshell${ours!.pid}`);
+  });
+});
+
 describe("result shape", () => {
   it("adds featureProfile only under governed-v1", async () => {
     const plain = await run({ config: { featureProfile: undefined } });
@@ -444,7 +513,7 @@ describe("result shape", () => {
     const governed: AdapterExecutionResult = (await run({ runId: "run-2" })).result;
     expect(Object.keys((governed.resultJson as { featureProfile: object }).featureProfile).sort()).toEqual([
       "agentDirDisabled", "agentSkills", "agentSkillsDisabled", "cachesCleared", "contextFilesCreated", "contextFilesDisabled", "foreignGoals",
-      "harnessBytes", "harnessEntriesDisabled", "harnessFingerprint", "maxSubagentsPerRun", "modelCatalog", "profile", "projectConfigCreated",
+      "harnessBytes", "harnessEntriesDisabled", "harnessFingerprint", "maxSubagentsPerRun", "modelCatalog", "persistentShellsKilled", "profile", "projectConfigCreated",
       "projectConfigDisabled", "refinementEvents", "scheduledJobsCreated", "scheduledJobsDisabled", "sessionSkillChecks", "sessions", "sessionsEnded",
       "settingsKeysRemoved", "skillDiscovery", "warnings", "workspaceContextFiles",
     ]);

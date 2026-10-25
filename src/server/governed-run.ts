@@ -5,6 +5,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { PrimeFeatureProfile } from "./feature-profile.js";
 import type { PrimeModelCatalogRecord } from "./model-catalog.js";
+import { reapPersistentShells, type PersistentShellKill } from "./persistent-shells.js";
 import { PRIME_WORKSPACE_SETTINGS } from "./skill-list.js";
 
 const CONTEXT_FILES = ["AGENTS.md", "SYSTEM.md", "APPEND_SYSTEM.md"] as const;
@@ -51,6 +52,8 @@ export interface GovernedRunState {
   refinementEventsBefore: number;
   contextFilesBefore: Map<string, Sha>;
   cachesCleared: Array<{ name: string; sha256: Sha }>;
+  /** G3 item 5: shells ended at run start, then at run end (execute.ts). */
+  persistentShellsKilled: PersistentShellKill[];
   /** Warnings found at run start (moves of entries an earlier run left). */
   startWarnings: string[];
   live: GovernedRunLive;
@@ -81,6 +84,7 @@ export interface GovernedReport {
   refinementEvents: { before: number; after: number };
   cachesCleared: Array<{ name: string; sha256: Sha }>;
   modelCatalog: PrimeModelCatalogRecord | null;
+  persistentShellsKilled: PersistentShellKill[];
   warnings: string[];
 }
 
@@ -354,16 +358,16 @@ const harnessKinds = async (agentDir: string): Promise<Array<{ kind: string; cou
   }
 };
 
-/** Run start, before Prime starts: items 4, 6, 8 (strip and refine stores), 9, 10 (workspace file) and 11. */
+/** Run start, before Prime starts: items 4, 6, 8 (strip and refine stores), 9, 10 (workspace file), G3 item 5's reap and item 11. */
 export async function startGovernedRun(input: {
-  profile: PrimeFeatureProfile; agentDir: string; cwd: string; runId: string;
+  profile: PrimeFeatureProfile; agentDir: string; cwd: string; runId: string; onLog?: (line: string) => Promise<void> | void;
 }): Promise<GovernedRunState> {
   const { profile, agentDir, cwd, runId } = input;
   const disabledDir = await ensureDisabledDir(agentDir, runId);
   const state: GovernedRunState = {
     profile, agentDir, cwd, runId, disabledDir, agentSkillsDisabled: [], agentDirDisabled: [], contextFilesDisabled: [], projectConfigDisabled: [],
     scheduledJobsDisabled: 0, harnessEntriesDisabled: [], harnessBefore: null, refinementEventsBefore: 0, contextFilesBefore: new Map(),
-    cachesCleared: [], startWarnings: [],
+    cachesCleared: [], persistentShellsKilled: [], startWarnings: [],
     live: { sessions: 0, sessionsEnded: [], sessionSkillChecks: 0, foreignGoals: [], skillDiscovery: "on", contextFiles: [], warnings: [], modelCatalog: null },
   };
   // Item 4: saved Prime schedules.
@@ -407,7 +411,11 @@ export async function startGovernedRun(input: {
       await moveTo(full, path.join(disabledDir, "skills", name));
     }
   }
-  // Item 11, last: the catalog caches and every entry off the keep-list (G3 item 5's reap will run before this).
+  // G3 item 5: shells left by a crash end before item 11 moves persistent-shells/ (the reap reads those records).
+  const reaped = await reapPersistentShells(agentDir, { when: "run_start", sessionIds: null, onLog: input.onLog ?? (() => undefined) });
+  state.persistentShellsKilled.push(...reaped.killed);
+  state.startWarnings.push(...reaped.warnings);
+  // Item 11, last: the catalog caches and every entry off the keep-list.
   await enforceAgentDirAllowlist(state);
   state.contextFilesBefore = await findContextFiles(cwd);
   return state;
@@ -481,7 +489,7 @@ export async function finishGovernedRun(state: GovernedRunState, settingsKeysRem
     harnessEntriesDisabled: state.harnessEntriesDisabled, harnessBytes: await treeBytes(path.join(agentDir, "harness")),
     harnessFingerprint: { before: state.harnessBefore, after: await sha256File(path.join(agentDir, "harness", "harness_state.json")) },
     refinementEvents: { before: state.refinementEventsBefore, after: await lineCount(path.join(agentDir, "refinement_history.jsonl")) },
-    cachesCleared: state.cachesCleared, modelCatalog: state.live.modelCatalog, warnings,
+    cachesCleared: state.cachesCleared, modelCatalog: state.live.modelCatalog, persistentShellsKilled: state.persistentShellsKilled, warnings,
   };
   return { report, workspaceFile: workspaceProblem };
 }
