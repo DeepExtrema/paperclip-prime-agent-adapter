@@ -47,6 +47,7 @@ export interface GovernedRunState {
   harnessBefore: Sha;
   refinementEventsBefore: number;
   contextFilesBefore: Map<string, Sha>;
+  cachesCleared: Array<{ name: string; sha256: Sha }>;
   /** Warnings found at run start (moves of entries an earlier run left). */
   startWarnings: string[];
   live: GovernedRunLive;
@@ -232,6 +233,37 @@ async function describe(file: string, name: string): Promise<DisabledEntry | nul
   return { name, kind: kindOf(stat), sha256: stat.isFile() ? await sha256File(file) : null };
 }
 
+/** Item 11: top-level agent-dir entries that stay. Every other entry moves aside at run start. */
+export const PRIME_AGENT_DIR_KEEP = [
+  "settings.json", "auth.json", "sessions", "session-artifacts", "harness", "skills", "refinement_history.jsonl", "telemetry.json",
+  ".paperclip-disabled", "session-leases", "rlm-ledger", "logs", "daemon-workers",
+] as const;
+/** Item 11: the catalog caches, deleted at run start; the file hashed for each (`models/` is a dir). */
+const CATALOG_CACHES = [
+  { name: "models", hashed: path.join("models", "provider-model-catalog.v1.json") },
+  { name: "mcp-service-catalog.v2.json", hashed: "mcp-service-catalog.v2.json" },
+] as const;
+
+/** Item 11: delete the catalog caches, then move every entry off the keep-list. */
+async function enforceAgentDirAllowlist(state: GovernedRunState): Promise<void> {
+  const { agentDir, disabledDir } = state;
+  for (const cache of CATALOG_CACHES) {
+    const full = path.join(agentDir, cache.name);
+    if (!(await lstat(full))) continue;
+    state.cachesCleared.push({ name: cache.name, sha256: await sha256File(path.join(agentDir, cache.hashed)) }); // a regular file only
+    await fs.rm(full, { recursive: true, force: true }); // a link is removed, its target left alone
+  }
+  const keep = new Set<string>(PRIME_AGENT_DIR_KEEP);
+  for (const name of (await fs.readdir(agentDir)).sort()) {
+    if (keep.has(name)) continue;
+    const entry = await describe(path.join(agentDir, name), name);
+    if (!entry) continue;
+    await moveTo(path.join(agentDir, name), path.join(disabledDir, name));
+    state.agentDirDisabled.push(entry);
+    state.startWarnings.push(`agent-dir entry off the keep-list moved aside: ${name}`);
+  }
+}
+
 /** Item 4: every scheduled-jobs.json under session-artifacts/, at any depth. */
 async function findJobFiles(dir: string, into: string[] = []): Promise<string[]> {
   const stat = await lstat(dir);
@@ -319,7 +351,7 @@ const harnessKinds = async (agentDir: string): Promise<Array<{ kind: string; cou
   }
 };
 
-/** Run start, before Prime starts: items 4, 6, 8 (strip and refine stores) and 9. Item 11 runs after this. */
+/** Run start, before Prime starts: items 4, 6, 8 (strip and refine stores), 9, 10 (workspace file) and 11. */
 export async function startGovernedRun(input: {
   profile: PrimeFeatureProfile; agentDir: string; cwd: string; runId: string;
 }): Promise<GovernedRunState> {
@@ -328,7 +360,7 @@ export async function startGovernedRun(input: {
   const state: GovernedRunState = {
     profile, agentDir, cwd, runId, disabledDir, agentSkillsDisabled: [], agentDirDisabled: [], contextFilesDisabled: [], projectConfigDisabled: [],
     scheduledJobsDisabled: 0, harnessEntriesDisabled: [], harnessBefore: null, refinementEventsBefore: 0, contextFilesBefore: new Map(),
-    startWarnings: [],
+    cachesCleared: [], startWarnings: [],
     live: { sessions: 0, sessionsEnded: [], sessionSkillChecks: 0, foreignGoals: [], skillDiscovery: "on", contextFiles: [], warnings: [] },
   };
   // Item 4: saved Prime schedules.
@@ -372,6 +404,8 @@ export async function startGovernedRun(input: {
       await moveTo(full, path.join(disabledDir, "skills", name));
     }
   }
+  // Item 11, last: the catalog caches and every entry off the keep-list (G3 item 5's reap will run before this).
+  await enforceAgentDirAllowlist(state);
   state.contextFilesBefore = await findContextFiles(cwd);
   return state;
 }
@@ -444,7 +478,7 @@ export async function finishGovernedRun(state: GovernedRunState, settingsKeysRem
     harnessEntriesDisabled: state.harnessEntriesDisabled, harnessBytes: await treeBytes(path.join(agentDir, "harness")),
     harnessFingerprint: { before: state.harnessBefore, after: await sha256File(path.join(agentDir, "harness", "harness_state.json")) },
     refinementEvents: { before: state.refinementEventsBefore, after: await lineCount(path.join(agentDir, "refinement_history.jsonl")) },
-    cachesCleared: [], modelCatalog: null, warnings,
+    cachesCleared: state.cachesCleared, modelCatalog: null, warnings,
   };
   return { report, workspaceFile: workspaceProblem };
 }

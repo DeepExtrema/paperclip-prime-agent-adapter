@@ -335,6 +335,41 @@ describe("item 7: goals not set by Paperclip", () => {
   });
 });
 
+describe("item 11: the agent dir is an allowlist; the catalog caches are deleted", () => {
+  it("moves models.json and every other entry off the keep-list, with a warning each, and keeps the keep-list", async () => {
+    write(path.join(agentDir(), "models.json"), '{"providers":{}}');
+    write(path.join(agentDir(), "extensions", "x.ts"), "x");
+    write(path.join(agentDir(), "persistent-shells", "s.json"), "{}");
+    for (const name of ["session-leases", "rlm-ledger", "logs", "daemon-workers"]) write(path.join(agentDir(), name, "kept.json"), "{}");
+    write(path.join(agentDir(), "telemetry.json"), "{}");
+    const { result, report, log } = await run();
+    expect(result.errorCode).toBeNull();
+    expect(report.agentDirDisabled).toEqual([
+      { name: "extensions", kind: "dir", sha256: null }, { name: "models.json", kind: "file", sha256: sha('{"providers":{}}') },
+      { name: "persistent-shells", kind: "dir", sha256: null },
+    ]);
+    expect(readFileSync(disabled("models.json"), "utf8")).toBe('{"providers":{}}');
+    expect(existsSync(path.join(agentDir(), "models.json"))).toBe(false);
+    for (const name of ["session-leases", "rlm-ledger", "logs", "daemon-workers", "telemetry.json"]) expect(existsSync(path.join(agentDir(), name))).toBe(true);
+    expect(report.warnings).toEqual(expect.arrayContaining(["extensions", "models.json", "persistent-shells"].map((n) => `agent-dir entry off the keep-list moved aside: ${n}`)));
+    expect(log).toContain("[paperclip] warning: agent-dir entry off the keep-list moved aside: models.json");
+  });
+  it("deletes both caches with the sha256 of each regular file and no warning; a cache link goes, its target stays", async () => {
+    write(path.join(agentDir(), "models", "provider-model-catalog.v1.json"), "catalog");
+    write(path.join(agentDir(), "mcp-service-catalog.v2.json"), "mcp");
+    const { report } = await run();
+    expect(report.cachesCleared).toEqual([{ name: "models", sha256: sha("catalog") }, { name: "mcp-service-catalog.v2.json", sha256: sha("mcp") }]);
+    expect([existsSync(path.join(agentDir(), "models")), existsSync(path.join(agentDir(), "mcp-service-catalog.v2.json"))]).toEqual([false, false]);
+    expect(report.warnings).toEqual([]);
+    const target = path.join(root, "elsewhere.json");
+    write(target, "keep me");
+    symlinkSync(target, path.join(agentDir(), "mcp-service-catalog.v2.json"));
+    const second = await run({ runId: "run-2" });
+    expect(second.report.cachesCleared).toEqual([{ name: "mcp-service-catalog.v2.json", sha256: null }]);
+    expect(readFileSync(target, "utf8")).toBe("keep me");
+  });
+});
+
 describe("result shape", () => {
   it("adds featureProfile only under governed-v1", async () => {
     const plain = await run({ config: { featureProfile: undefined } });
