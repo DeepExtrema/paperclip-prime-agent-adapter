@@ -42,7 +42,7 @@ describe("printPrimeStreamEvent", () => {
   it("prints [paperclip] lines in blue, other lines as they are, and skips blank lines", () => {
     expect(printed("[paperclip] Starting a fresh Prime session")).toEqual([[pc.blue("[paperclip] Starting a fresh Prime session")]]);
     expect(printed("plain text")).toEqual([["plain text"]]);
-    expect(printed('{"type":"auto_retry_start"}')).toEqual([['{"type":"auto_retry_start"}']]);
+    expect(printed('{"type":"auto_retry_start","attempt":1,"maxAttempts":3,"delayMs":2000}')).toEqual([[pc.blue("provider retry 1/3 in 2000 ms")]]);
     expect(printed("   ")).toEqual([]);
   });
   it("prints ignored stream events only in debug mode, in gray", () => {

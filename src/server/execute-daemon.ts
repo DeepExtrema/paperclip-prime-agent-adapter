@@ -638,7 +638,7 @@ async function runAttempt(
     };
     emit(`${
       JSON.stringify(
-        {type : "session", version : 3, id : session.sessionId, timestamp : new Date().toISOString(), cwd})}\n`);
+        {type : "session", version : 3, id : session.sessionId, timestamp : new Date().toISOString(), cwd, model : `${runtime.provider}/${runtime.model}`})}\n`);
     await must({type : "attach"});
     if (governed) {
       // TAI-273 §2.2 item 2: count and cap every other session; the item 1 isQuotaParked backstop.

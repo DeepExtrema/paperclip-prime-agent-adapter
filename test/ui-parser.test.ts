@@ -18,9 +18,9 @@ describe("line classification", () => {
     expect(parseStdoutLine("plain text", TS)).toEqual([{ kind: "stdout", ts: TS, text: "plain text" }]);
     expect(parseStdoutLine("[1,2]", TS)).toEqual([{ kind: "stdout", ts: TS, text: "[1,2]" }]);
   });
-  it("maps an unknown event type to stdout with the trimmed line", () => {
-    const raw = '{"type":"auto_retry_start","attempt":1}';
-    expect(parseStdoutLine(` ${raw} `, TS)).toEqual([{ kind: "stdout", ts: TS, text: raw }]);
+  it("maps an unknown event type to a system line without the raw JSON (TAI-273 §4.4)", () => {
+    expect(parseStdoutLine(' {"type":"session_action_update","actions":{}} ', TS)).toEqual([{ kind: "system", ts: TS, text: "Prime event session_action_update" }]);
+    expect(parseStdoutLine('{"x":1}', TS)).toEqual([{ kind: "system", ts: TS, text: "Prime event without a type" }]);
   });
 });
 
@@ -135,14 +135,13 @@ describe("whole runs", () => {
 });
 
 describe("parser state and robustness", () => {
-  it("createStdoutParser uses the last assistant model for init until reset", () => {
+  it("createStdoutParser keeps no state across lines: init takes the session line's own model (TAI-273 §4.4)", () => {
     const parser = createStdoutParser();
     parser.parseLine(line("run2", 12), TS);
-    expect(parser.parseLine(line("run3", 1), TS)).toMatchObject([{ kind: "init", model: "claude-haiku-4-5" }]);
-    parser.reset();
     expect(parser.parseLine(line("run3", 1), TS)).toMatchObject([{ kind: "init", model: "" }]);
-    parseStdoutLine(line("run2", 12), TS);
-    expect(parseStdoutLine(line("run3", 1), TS)).toMatchObject([{ kind: "init", model: "" }]);
+    const session = '{"type":"session","version":3,"id":"s1","cwd":"/w","model":"anthropic/claude-opus-5-5"}';
+    expect(parser.parseLine(session, TS)).toEqual([{ kind: "init", ts: TS, model: "anthropic/claude-opus-5-5", sessionId: "s1" }]);
+    expect(parseStdoutLine(session, TS)).toEqual(parser.parseLine(session, TS));
   });
   it("never throws on malformed events", () => {
     const inputs = ['{"type":"message_end"}', '{"type":"message_end","message":{"role":"assistant","content":"plain"}}',
@@ -151,5 +150,40 @@ describe("parser state and robustness", () => {
       '{"type":"session","id":7}', "null", "{"];
     for (const input of inputs) expect(Array.isArray(parseStdoutLine(input, TS))).toBe(true);
     expect(parseStdoutLine(inputs[1] ?? "", TS)).toEqual([{ kind: "assistant", ts: TS, text: "plain" }]);
+  });
+});
+
+describe("G4: daemon event rows (TAI-273 §4.4)", () => {
+  const fixtureLines = readFileSync(new URL("./fixtures/prime-jsonl/daemon-g4.jsonl", import.meta.url), "utf8").split("\n");
+  it.each([
+    ['{"type":"rlm_child_update","child":{"id":"sub-1","activeSessionId":"a1","sessionName":"w1","status":"done","answerPreview":"child-answer"}}', "subagent w1 (depth 1): done — child-answer"],
+    ['{"type":"rlm_child_update","child":{"activeSessionId":"a1","rlmDepth":2,"status":"running"}}', "subagent a1 (depth 2): running"],
+    [`{"type":"rlm_child_update","child":{"sessionName":"w1","status":"done","answerPreview":"${"x".repeat(300)}"}}`, `subagent w1 (depth 1): done — ${"x".repeat(200)}…`],
+    ['{"type":"auto_retry_start","attempt":1,"maxAttempts":3,"delayMs":1965,"errorMessage":"Provider rate limit exceeded (rate_limit_error, 429)"}', "provider retry 1/3 in 1965 ms: Provider rate limit exceeded (rate_limit_error, 429)"],
+    ['{"type":"auto_retry_end","success":true,"attempt":1}', "provider retry 1 succeeded"],
+    ['{"type":"auto_retry_end","success":false,"attempt":3,"finalError":"boom"}', "provider retry 3 failed: boom"],
+    ['{"type":"compaction_start","reason":"manual"}', "compaction started (manual)"],
+    ['{"type":"compaction_end","reason":"manual","aborted":false}', "compaction finished"],
+    ['{"type":"compaction_end","aborted":false,"errorMessage":"Session is too short to compact"}', "compaction not done: Session is too short to compact"],
+    ['{"type":"goal_update","goal":{"objective":"Ship it","status":"active"}}', "goal active: Ship it"],
+    ['{"type":"thread_goal_state","data":{"active":false,"status":"idle"}}', "goal idle"],
+    ['{"type":"model_change","model":{"provider":"anthropic","id":"claude-opus-5-5"}}', "model changed to anthropic/claude-opus-5-5"],
+  ])("%s", (input, text) => {
+    expect(parseStdoutLine(input, TS)).toEqual([{ kind: "system", ts: TS, text }]);
+  });
+  it("maps an error event to stderr", () => {
+    expect(parseStdoutLine('{"type":"error","message":"worker crashed"}', TS)).toEqual([{ kind: "stderr", ts: TS, text: "worker crashed" }]);
+  });
+  it("renders a recorded 0.10.1 daemon run (child, retry, compaction) with no raw JSON and no throw, the same both ways", () => {
+    const parser = createStdoutParser();
+    const types = new Set<string>();
+    for (const raw of fixtureLines) {
+      const stateless = parseStdoutLine(raw, TS);
+      expect(parser.parseLine(raw, TS)).toEqual(stateless);
+      for (const entry of stateless) if ("text" in entry) expect(entry.text.startsWith("{"), entry.text).toBe(false);
+      if (raw.trim()) types.add(JSON.parse(raw).type);
+    }
+    expect([...types]).toEqual(expect.arrayContaining(["rlm_child_update", "auto_retry_start", "auto_retry_end", "compaction_start", "compaction_end"]));
+    expect(parseStdoutLine(fixtureLines[0]!, TS)).toMatchObject([{ kind: "init", model: "anthropic/claude-opus-5-5" }]);
   });
 });

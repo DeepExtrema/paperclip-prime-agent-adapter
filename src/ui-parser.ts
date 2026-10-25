@@ -1,5 +1,6 @@
 // Owner: WP6. Contract: INTERFACES.md §12 and Paperclip adapter-ui-parser.md 1.0.0.
 // Self-contained: zero imports, no module-level side effects, never throws.
+// TAI-273 §4.4 (G4): every mapping is single-line and stateless, so parseStdoutLine and createStdoutParser give the same entries.
 
 type UiTranscriptEntry =
   | { kind: "assistant" | "thinking" | "user" | "stderr" | "system" | "stdout"; ts: string; text: string }
@@ -8,8 +9,6 @@ type UiTranscriptEntry =
   | { kind: "init"; ts: string; model: string; sessionId: string }
   | { kind: "result"; ts: string; text: string; inputTokens: number; outputTokens: number; cachedTokens: number;
       costUsd: number; subtype: string; isError: boolean; errors: string[] };
-
-type ParserState = { model: string };
 
 const DEFAULT_PROVIDER_ERROR = "Prime provider request failed.";
 /** Text, tool calls and tool results come from message_end only (INTERFACES §12, §16 A5); these would duplicate them. */
@@ -44,9 +43,7 @@ function errorText(message: Record<string, unknown>): string {
   return asString(message.errorMessage).trim() || DEFAULT_PROVIDER_ERROR;
 }
 
-function assistantEntries(state: ParserState, message: Record<string, unknown>, ts: string): UiTranscriptEntry[] {
-  const model = asString(message.model);
-  if (model) state.model = model;
+function assistantEntries(message: Record<string, unknown>, ts: string): UiTranscriptEntry[] {
   const entries: UiTranscriptEntry[] = [];
   const thinking = joinItems(message.content, "thinking", "thinking");
   if (thinking) entries.push({ kind: "thinking", ts, text: thinking });
@@ -84,12 +81,31 @@ function resultEntry(event: Record<string, unknown>, ts: string): UiTranscriptEn
   return { kind: "result", ts, text, inputTokens, outputTokens, cachedTokens, costUsd: 0, subtype: "end", isError, errors };
 }
 
-function parseEvent(state: ParserState, event: Record<string, unknown>, raw: string, ts: string): UiTranscriptEntry[] {
+const PREVIEW_CHARS = 200;
+const preview = (text: string) => (text.length > PREVIEW_CHARS ? `${text.slice(0, PREVIEW_CHARS)}…` : text);
+const system = (ts: string, text: string): UiTranscriptEntry[] => [{ kind: "system", ts, text }];
+
+/** rlm_child_update: the run log carries the parent's events only, so a child without rlmDepth is a direct child (depth 1). */
+function childEntry(event: Record<string, unknown>, ts: string): UiTranscriptEntry[] {
+  const child = asRecord(event.child) ?? {};
+  const name = asString(child.sessionName) || asString(child.name) || asString(child.id) || asString(child.activeSessionId) || "child";
+  const depth = typeof child.rlmDepth === "number" ? child.rlmDepth : 1;
+  const answer = asString(child.answerPreview) || asString(child.answer);
+  return system(ts, `subagent ${name} (depth ${depth}): ${asString(child.status, "update")}${answer ? ` — ${preview(answer)}` : ""}`);
+}
+
+function goalEntry(event: Record<string, unknown>, ts: string): UiTranscriptEntry[] {
+  const goal = asRecord(event.goal) ?? asRecord(event.data) ?? event;
+  const objective = asString(goal.objective);
+  return system(ts, `goal ${asString(goal.status, "update")}${objective ? `: ${preview(objective)}` : ""}`);
+}
+
+function parseEvent(event: Record<string, unknown>, ts: string): UiTranscriptEntry[] {
   const type = asString(event.type);
-  if (type === "session") return [{ kind: "init", ts, model: state.model, sessionId: asString(event.id) }];
+  if (type === "session") return [{ kind: "init", ts, model: asString(event.model), sessionId: asString(event.id) }];
   if (type === "message_end") {
     const message = asRecord(event.message);
-    if (message?.role === "assistant") return assistantEntries(state, message, ts);
+    if (message?.role === "assistant") return assistantEntries(message, ts);
     if (message?.role === "toolResult") return [toolResultEntry(message, ts)];
     if (message?.role === "user") {
       const text = joinItems(message.content, "text", "text");
@@ -99,31 +115,49 @@ function parseEvent(state: ParserState, event: Record<string, unknown>, raw: str
   }
   if (type === "agent_end") return [resultEntry(event, ts)];
   if (IGNORED_EVENT_TYPES.includes(type)) return [];
-  return [{ kind: "stdout", ts, text: raw }]; // unknown event type
-}
-
-function parseWithState(state: ParserState, line: string, ts: string): UiTranscriptEntry[] {
-  const raw = typeof line === "string" ? line.trim() : "";
-  if (!raw) return [];
-  if (raw.startsWith("[paperclip]")) return [{ kind: "system", ts, text: raw }];
-  try {
-    const event = asRecord(JSON.parse(raw));
-    return event ? parseEvent(state, event, raw, ts) : [{ kind: "stdout", ts, text: raw }];
-  } catch {
-    return [{ kind: "stdout", ts, text: raw }];
+  if (type === "rlm_child_update") return childEntry(event, ts);
+  if (type === "auto_retry_start") {
+    const reason = asString(event.errorMessage) || asString(event.reason);
+    return system(ts, `provider retry ${asNumber(event.attempt)}/${asNumber(event.maxAttempts)} in ${asNumber(event.delayMs)} ms${reason ? `: ${preview(reason)}` : ""}`);
   }
+  if (type === "auto_retry_end") {
+    const reason = asString(event.finalError);
+    return system(ts, `provider retry ${asNumber(event.attempt)} ${event.success === true ? "succeeded" : "failed"}${reason ? `: ${preview(reason)}` : ""}`);
+  }
+  if (type === "compaction_start") return system(ts, `compaction started${asString(event.reason) ? ` (${asString(event.reason)})` : ""}`);
+  if (type === "compaction_end") {
+    const error = asString(event.errorMessage);
+    return system(ts, `compaction ${event.aborted === true ? "aborted" : error ? "not done" : "finished"}${error ? `: ${preview(error)}` : ""}`);
+  }
+  if (type === "goal_update" || type === "thread_goal_state") return goalEntry(event, ts);
+  if (type === "model_change") {
+    const model = asRecord(event.model);
+    const name = model ? [asString(model.provider), asString(model.id)].filter(Boolean).join("/") : asString(event.model);
+    return system(ts, `model changed${name ? ` to ${name}` : ""}`);
+  }
+  if (type === "error") return [{ kind: "stderr", ts, text: asString(event.message) || asString(event.error) || "Prime error" }];
+  return system(ts, `Prime event ${type || "without a type"}`);
 }
 
 export function parseStdoutLine(line: string, ts: string): UiTranscriptEntry[] {
-  return parseWithState({ model: "" }, line, ts);
+  try {
+    const raw = typeof line === "string" ? line.trim() : "";
+    if (!raw) return [];
+    if (raw.startsWith("[paperclip]")) return [{ kind: "system", ts, text: raw }];
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return [{ kind: "stdout", ts, text: raw }];
+    }
+    const event = asRecord(parsed);
+    return event ? parseEvent(event, ts) : [{ kind: "stdout", ts, text: raw }];
+  } catch {
+    return [];
+  }
 }
 
+/** The same entries as parseStdoutLine, line by line (G4): no state crosses lines. */
 export function createStdoutParser(): { parseLine(line: string, ts: string): UiTranscriptEntry[]; reset(): void } {
-  const state: ParserState = { model: "" };
-  return {
-    parseLine: (line: string, ts: string) => parseWithState(state, line, ts),
-    reset: () => {
-      state.model = "";
-    },
-  };
+  return { parseLine: (line: string, ts: string) => parseStdoutLine(line, ts), reset: () => undefined };
 }
