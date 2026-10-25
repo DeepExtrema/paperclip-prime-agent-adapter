@@ -390,7 +390,8 @@ export async function finishPrimeRun(result: AdapterExecutionResult, input: {
   const { policy, settings, credential, agentDir, sources } = input;
   const enforced = policy.allowedModels !== null;
   const settingsCheck = settings ? await checkPrimeSettings(settings) : null;
-  const authCheck = enforced && credential.mode === "api_key" ? await checkPrimeAuth(agentDir, credential.provider) : null;
+  // TAI-273 §3.2: managed_subscription gets the same check as api_key (its auth.json holds only anthropic).
+  const authCheck = enforced && credential.mode !== "host_auth" ? await checkPrimeAuth(agentDir, credential.provider) : null;
   const modelAudit = await auditPrimeModels(sources, policy.allowedModels);
   const resultJson = { ...(result.resultJson ?? {}), modelAudit, ...(settingsCheck ? { settings: settingsCheck } : {}), ...(authCheck ? { authCheck } : {}) };
   if (!enforced) return { ...result, resultJson };

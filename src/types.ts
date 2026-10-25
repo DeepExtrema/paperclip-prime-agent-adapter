@@ -28,7 +28,7 @@ export const PRIME_SUPPORTED_VERSION_RANGE = { min: "0.10.0", maxExclusive: "0.1
 export const PRIME_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type PrimeThinkingLevel = (typeof PRIME_THINKING_LEVELS)[number];
 
-export type PrimeCredentialMode = "host_auth" | "api_key";
+export type PrimeCredentialMode = "host_auth" | "api_key" | "managed_subscription";
 
 /** Where the per-agent Prime dir gets its provider credential from. */
 export type PrimeCredentialConfig =
@@ -43,6 +43,12 @@ export type PrimeCredentialConfig =
       provider: string;
       /** Name of the config env var that holds the key (for example ANTHROPIC_API_KEY). Never the value. */
       apiKeyEnvVar: string;
+    }
+  | {
+      /** TAI-273 §3 (C1): the host's managed Claude subscription. The token comes from env CLAUDE_CODE_OAUTH_TOKEN. */
+      mode: "managed_subscription";
+      /** Always "anthropic"; equals PrimeRuntimeConfig.provider. */
+      provider: string;
     };
 
 /** Paths for one Prime agent dir. Pure data; creating it is seedPrimeAgentDir's job. */
@@ -108,7 +114,7 @@ export type ResolvePrimeRuntimeConfig = (
 export interface SeededPrimeAgentDir {
   plan: PrimeAgentDirPlan;
   /** How auth.json was provisioned in this dir. */
-  auth: "host_auth_symlink" | "api_key_file";
+  auth: "host_auth_symlink" | "api_key_file" | "managed_token_file";
   /** "subscription" for a host OAuth credential or an `sk-ant-oat` subscription token; "api" for other API keys; "unknown" otherwise. */
   billingType: Extract<AdapterBillingType, "subscription" | "api" | "unknown">;
   /** Human-readable notes for onMeta commandNotes. Never contain secrets. */
@@ -164,6 +170,8 @@ export type BuildPrimeChildEnv = (
   plan: PrimeAgentDirPlan,
   /** buildPaperclipEnv + run vars + refreshPaperclipWorkspaceEnvForExecution output (includes config.env). */
   paperclipEnv: Record<string, string>,
+  /** stripAnthropicEnv: drop every ANTHROPIC_* key of paperclipEnv (TAI-273 §3.2: managed_subscription, and api_key under governed-v1). */
+  options?: { stripAnthropicEnv?: boolean },
 ) => PrimeChildEnv;
 
 // ---------------------------------------------------------------------------
@@ -376,6 +384,13 @@ export const PRIME_CHECK_CODES = [
   "prime_models_skipped",
   "prime_model_listed",
   "prime_model_unknown",
+  /** TAI-273 §3.2: the load-time registration of prime_agent_local for the anthropic subscription method. */
+  "prime_auth_managed_registered",
+  "prime_auth_managed_unregistered",
+  /** TAI-273 §3.2 checks 1-3 passed on the token the test body carried. */
+  "prime_auth_managed_token_ok",
+  /** TAI-273 §3.2: a fail-closed rule or a check 1-4 failed. */
+  "prime_managed_connection_invalid",
 ] as const;
 export type PrimeCheckCode = (typeof PRIME_CHECK_CODES)[number];
 
@@ -400,5 +415,13 @@ export const PRIME_RESULT_ERROR_CODES = [
   "prime_settings_tampered",
   "prime_auth_tampered",
   "prime_model_audit_failed",
+  /** TAI-273 §3.2: a Paperclip AI binding without managed_subscription, or managed_subscription whose checks fail. Before any file is written. */
+  "prime_managed_connection_invalid",
+  /** TAI-273 §3.2: auth.json could not be deleted after a managed_subscription run. */
+  "prime_auth_cleanup_failed",
+  /** TAI-273 §3.2: the provider refused the credential (diagnostic kind "auth"). The session row is kept. */
+  "prime_provider_auth_failed",
+  /** TAI-273 §3.2: the provider rate limit or usage limit (diagnostic kind "rate_limit", after Prime's retries). The session row is kept. */
+  "prime_provider_quota",
 ] as const;
 export type PrimeResultErrorCode = (typeof PRIME_RESULT_ERROR_CODES)[number];

@@ -9,8 +9,9 @@ export function getPrimeConfigSchema(): AdapterConfigSchema {
         options: [
           { value: "host_auth", label: "Host Prime login (auth.json symlink)" },
           { value: "api_key", label: "API key from an environment variable" },
+          { value: "managed_subscription", label: "Paperclip's managed Claude subscription" },
         ],
-        hint: "host_auth links the host ~/.prime/agent/auth.json into this agent's own Prime dir. Unsafe with Prime 0.10: a token refresh splits the login. Prefer api_key." },
+        hint: "host_auth links the host ~/.prime/agent/auth.json into this agent's own Prime dir. Unsafe with Prime 0.10: a token refresh splits the login. Prefer api_key. managed_subscription uses the agent's Paperclip AI connection to Claude, and needs featureProfile governed-v1." },
       { key: "apiKeyEnvVar", label: "API key environment variable", type: "text",
         hint: "Name of the env var (bind it to a Paperclip secret) that holds the provider key. Never the key itself.",
         meta: { visibleWhen: { key: "credentialMode", values: ["api_key"] } } },

@@ -9,7 +9,7 @@ import {type ParsedPrimeOutput, PRIME_ADAPTER_TYPE, type PrimeSessionParams} fro
 
 import { emitPrimeMeta, type PreparedRun, type SystemPrompt } from "./execute.js";
 import { notePrimeChild, notePrimeParent, type PrimeAuditSources } from "./model-policy.js";
-import {parsePrimeJsonl} from "./parse.js";
+import {parsePrimeJsonl, primeProviderErrorCode} from "./parse.js";
 
 export type PrimeDaemonErrorCode =|"prime_daemon_start_failed"|"prime_daemon_socket_unsafe"|
   "prime_daemon_protocol_error"|"prime_daemon_closed"|"prime_daemon_request_timeout";
@@ -653,12 +653,12 @@ function mapResult(o: Outcome, prep: PreparedRun, daemon: RunDaemon, clearSessio
     case "timed_out": return { ...fail("prime_run_timeout", `Timed out after ${runtime.timeoutSec}s${o.error ? `: ${o.error}` : ""}`), exitCode: null, timedOut: true };
     case "cancelled": return fail("prime_run_cancelled", "Run cancelled.");
     case "closed": return fail("prime_run_uncertain", `Prime daemon connection lost; the run outcome is uncertain. ${o.error}`);
-    case "create_failed":
-    case "prompt_failed": return fail("prime_run_failed", o.error ?? "Prime daemon run failed.");
+    case "create_failed": return fail("prime_run_failed", o.error ?? "Prime daemon run failed.");
+    case "prompt_failed": return fail(primeProviderErrorCode(o.stdout) ?? "prime_run_failed", o.error ?? "Prime daemon run failed.");
     case "completed": break;
   }
   if (!o.parsed.sawAgentEnd) return fail("prime_run_uncertain", "The Prime daemon reported completion without an agent_end event; the run outcome is uncertain.");
-  if (o.parsed.errors.length > 0) return fail("prime_run_failed", o.parsed.errors[0]!); const s = o.session!;
+  if (o.parsed.errors.length > 0) return fail(primeProviderErrorCode(o.stdout) ?? "prime_run_failed", o.parsed.errors[0]!); const s = o.session!;
   const sessionParams: PrimeSessionParams = { sessionId: s.sessionId, sessionFile: s.sessionFile, cwd: prep.cwd,
     provider: runtime.provider, model: runtime.model, agentDir: runtime.agentDir.agentDir };
   return { ...base, exitCode: 0, errorCode: null, errorMessage: null, sessionId: s.sessionId, sessionParams: { ...sessionParams },

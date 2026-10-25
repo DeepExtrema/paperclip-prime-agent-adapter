@@ -92,8 +92,9 @@ function parseCredential(config: Record<string, unknown>, provider: string): Pri
     }
     return { mode: "api_key", provider, apiKeyEnvVar };
   }
+  if (mode === "managed_subscription") return { mode: "managed_subscription", provider };
   if (mode !== "host_auth") {
-    throw new PrimeConfigError("prime_credential_mode_invalid", "adapterConfig.credentialMode must be host_auth or api_key.");
+    throw new PrimeConfigError("prime_credential_mode_invalid", "adapterConfig.credentialMode must be host_auth, api_key or managed_subscription.");
   }
   const hostAuthFile = absolutePath(config.hostAuthFile, "hostAuthFile");
   return { mode: "host_auth", hostAuthFile: hostAuthFile ?? path.join(os.homedir(), ".prime", "agent", "auth.json") };
@@ -275,9 +276,11 @@ export const seedPrimeAgentDir: SeedPrimeAgentDir = async (plan, input) => {
     const billingType = await readHostBillingType(credential.hostAuthFile, input.provider);
     return { plan, auth: "host_auth_symlink", billingType, notes };
   }
-  const key = (input.env[credential.apiKeyEnvVar] ?? "").trim();
+  // TAI-273 §3.2: managed_subscription takes the token the host put in CLAUDE_CODE_OAUTH_TOKEN (checked before this write).
+  const keyEnvVar = credential.mode === "managed_subscription" ? MANAGED_TOKEN_ENV : credential.apiKeyEnvVar;
+  const key = (input.env[keyEnvVar] ?? "").trim();
   if (key === "") {
-    const message = `Environment variable ${credential.apiKeyEnvVar} is unset or empty; it must hold the ${credential.provider} API key.`;
+    const message = `Environment variable ${keyEnvVar} is unset or empty; it must hold the ${credential.provider} API key.`;
     throw new PrimeCredentialError("prime_api_key_missing", message);
   }
   const content = `${JSON.stringify({ [credential.provider]: { type: "api_key", key } })}\n`;
@@ -285,6 +288,10 @@ export const seedPrimeAgentDir: SeedPrimeAgentDir = async (plan, input) => {
   const written = await fs.lstat(authFile);
   if (written.isSymbolicLink() || !isPrivateRegularFile(written)) {
     throw new PrimeCredentialError("prime_auth_file_unsafe", `${authFile} must be a regular file owned by this user with mode 0600.`);
+  }
+  if (credential.mode === "managed_subscription") {
+    notes.push(`auth.json written from the host's managed Claude subscription connection for provider ${credential.provider} (billing: subscription); deleted after the run.`);
+    return { plan, auth: "managed_token_file", billingType: "subscription", notes };
   }
   // TAI-225 §9 item 6: a Claude subscription token (`claude setup-token`) is billed to the subscription, not per call.
   const billingType = key.startsWith("sk-ant-oat") ? "subscription" : "api";
@@ -319,9 +326,11 @@ const BASE_ENV_KEYS = new Set([
   "PAPERCLIP_RUNTIME_API_URL", "PAPERCLIP_LISTEN_HOST", "PAPERCLIP_LISTEN_PORT",
 ]);
 const OWNED_KEYS: readonly string[] = PRIME_ADAPTER_OWNED_ENV_KEYS;
+/** Same key as managed-connection.ts PRIME_MANAGED_TOKEN_ENV (that module registers with the host at import). */
+const MANAGED_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN";
 
 /** Stripped keys stay as explicit undefined: runChildProcess merges process.env first, then deletes undefined keys (§16 A8). */
-export const buildPrimeChildEnv: BuildPrimeChildEnv = (base, plan, paperclipEnv) => {
+export const buildPrimeChildEnv: BuildPrimeChildEnv = (base, plan, paperclipEnv, options = {}) => {
   const dropped = new Set<string>();
   const env: Record<string, string | undefined> = {};
   for (const [key, value] of Object.entries(sanitizeInheritedPaperclipEnv(base))) { // §16 A17: no server PAPERCLIP_* secrets
@@ -332,8 +341,10 @@ export const buildPrimeChildEnv: BuildPrimeChildEnv = (base, plan, paperclipEnv)
   }
   // TAI-225 §9 item 7: the api_key value reaches Prime only through auth.json, never through the kernel's or bash's environment.
   const apiKeyEnvVar = plan.credential.mode === "api_key" ? plan.credential.apiKeyEnvVar : null;
+  // TAI-273 §3.2: Prime never reads CLAUDE_CODE_OAUTH_TOKEN; its only source is the host binding.
   for (const [key, value] of Object.entries(paperclipEnv)) {
-    const strip = hasPrefix(key, PRIME_ALWAYS_STRIPPED_ENV_PREFIXES) || OWNED_KEYS.includes(key) || key === apiKeyEnvVar;
+    const strip = hasPrefix(key, PRIME_ALWAYS_STRIPPED_ENV_PREFIXES) || OWNED_KEYS.includes(key) || key === apiKeyEnvVar
+      || key === MANAGED_TOKEN_ENV || (options.stripAnthropicEnv === true && key.startsWith("ANTHROPIC_"));
     if (strip) dropped.add(key);
     env[key] = strip ? undefined : value;
   }

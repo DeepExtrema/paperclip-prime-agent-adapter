@@ -196,3 +196,31 @@ export const isPrimeUnknownSessionError: IsPrimeUnknownSessionError = (stdout, s
     .join("\n");
   return /unknown\s+session|session\s+not\s+found|session\s+.*\s+not\s+found|no\s+session/i.test(haystack);
 };
+
+/**
+ * TAI-273 §3.2 (N0 item 14): the provider failure kind from the `diagnostics` of the last assistant message that ended
+ * with stopReason "error": "auth" for a 401 or 403, "rate_limit" for a 429 after Prime's retries. null when none.
+ */
+export function primeProviderFailureKind(stdout: string): string | null {
+  let kind: string | null = null;
+  for (const line of stdout.split(/\r?\n/)) {
+    const event = parseEventLine(line);
+    if (!event) continue;
+    const messages = event.type === "agent_end" && Array.isArray(event.messages) ? event.messages : [event.message];
+    for (const value of messages) {
+      const message = assistantMessage(value);
+      if (message?.stopReason !== "error" || !Array.isArray(message.diagnostics)) continue;
+      for (const diagnostic of message.diagnostics) {
+        const found = asObject(asObject(diagnostic)?.details)?.kind;
+        if (typeof found === "string" && found) kind = found;
+      }
+    }
+  }
+  return kind;
+}
+
+/** The run error code for a provider failure kind; null leaves the caller's own code (TAI-273 §3.2). */
+export function primeProviderErrorCode(stdout: string): "prime_provider_auth_failed" | "prime_provider_quota" | null {
+  const kind = primeProviderFailureKind(stdout);
+  return kind === "auth" ? "prime_provider_auth_failed" : kind === "rate_limit" ? "prime_provider_quota" : null;
+}

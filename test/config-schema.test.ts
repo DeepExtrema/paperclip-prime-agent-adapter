@@ -19,7 +19,7 @@ describe("getPrimeConfigSchema", () => {
   });
   it("defaults credentialMode to host_auth and shows apiKeyEnvVar only for api_key", () => {
     expect(field("credentialMode")?.default).toBe("host_auth");
-    expect(field("credentialMode")?.options?.map((o) => o.value)).toEqual(["host_auth", "api_key"]);
+    expect(field("credentialMode")?.options?.map((o) => o.value)).toEqual(["host_auth", "api_key", "managed_subscription"]);
     expect(field("apiKeyEnvVar")?.meta).toEqual({ visibleWhen: { key: "credentialMode", values: ["api_key"] } });
   });
   it("offers Prime's default (empty) first, then every thinking level", () => {

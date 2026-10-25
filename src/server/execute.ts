@@ -19,8 +19,9 @@ import {
 import {
   finishPrimeRun, notePrimeParent, preparePrimeSettings, resolvePrimeModelPolicy, startPrimeAudit, type PrimeAuditSources, type PrimeModelPolicy,
 } from "./model-policy.js";
+import { finishPrimeManagedCredential, resolvePrimeManagedConnection, type PrimeManagedBinding } from "./managed-connection.js";
 import { assertPrimeModelListed, listPrimeModels } from "./models.js";
-import { isPrimeUnknownSessionError, parsePrimeJsonl } from "./parse.js";
+import { isPrimeUnknownSessionError, parsePrimeJsonl, primeProviderErrorCode } from "./parse.js";
 import { assertPrimeCwdAllowed, buildPrimeChildEnv, resolvePrimeCommand, resolvePrimeRuntimeConfig, seedPrimeAgentDir } from "./runtime-config.js";
 import { decidePrimeResume, primeSessionCodec, readPrimeSessionHeader } from "./session.js";
 import { stagePrimeSkills } from "./skills.js";
@@ -81,19 +82,24 @@ class RunCancelledError extends Error {}
 const throwIfAborted = (ctx: AdapterExecutionContext) => { if (ctx.signal?.aborted) throw new RunCancelledError("Run cancelled before prime-agent started."); };
 const cancelledResult = (message: string): AdapterExecutionResult =>
   ({ exitCode: 1, signal: null, timedOut: false, errorCode: "prime_run_cancelled", errorMessage: message, clearSession: false });
+/** Codes that prove no provider work started (TAI-273 §3.2, §2.2): the host may treat the run as a bootstrap failure. */
+const BOOTSTRAP_CODES: readonly string[] = ["prime_managed_connection_invalid"];
 /** errorMeta.primeErrorCode: the `code` of any adapter error class (codes start with "prime_"), else null. A PrimePolicyError code is also the errorCode. */
 function preflightFailure(err: unknown): AdapterExecutionResult {
   if (err instanceof RunCancelledError) return cancelledResult(err.message);
   if (err instanceof PrimePolicyError) {
-    return { exitCode: 1, signal: null, timedOut: false, errorCode: err.code, errorMessage: err.message, errorMeta: { primeErrorCode: err.code }, clearSession: false };
+    const recovery = BOOTSTRAP_CODES.includes(err.code) ? { executionRecovery: { kind: "bootstrap" as const, providerWorkStarted: false as const } } : {};
+    return { exitCode: 1, signal: null, timedOut: false, errorCode: err.code, errorMessage: err.message, errorMeta: { primeErrorCode: err.code }, clearSession: false, ...recovery };
   }
   const code = err instanceof Error ? (err as Error & { code?: unknown }).code : undefined;
   const primeErrorCode = typeof code === "string" && code.startsWith("prime_") ? code : null;
   const errorMessage = err instanceof Error ? err.message : String(err);
   return { exitCode: 1, signal: null, timedOut: false, errorCode: "prime_preflight_failed", errorMessage, errorMeta: { primeErrorCode }, clearSession: false };
 }
+/** TAI-273 §3.2: set just before auth.json is written for managed_subscription; execute deletes it on every path after that. */
+type RunTrack = { managed: { agentDir: string; binding: PrimeManagedBinding } | null; preflight: boolean };
 /** INTERFACES §11.3: every step before spawn. */
-async function prepareRun(ctx: AdapterExecutionContext, startedAtMs: number, native: PrimeNativeConfig): Promise<PreparedRun> {
+async function prepareRun(ctx: AdapterExecutionContext, startedAtMs: number, native: PrimeNativeConfig, track: RunTrack): Promise<PreparedRun> {
   const target = readAdapterExecutionTarget({ executionTarget: ctx.executionTarget, legacyRemoteExecution: ctx.executionTransport?.remoteExecution });
   if (adapterExecutionTargetIsRemote(target)) {
     throw new Error(`prime_agent_local runs only on the local Paperclip host in phase 1; refusing ${describeAdapterExecutionTarget(target)}.`);
@@ -101,8 +107,10 @@ async function prepareRun(ctx: AdapterExecutionContext, startedAtMs: number, nat
   throwIfAborted(ctx);
   const configured = resolvePrimeRuntimeConfig(ctx.config, ctx.agent, resolvePaperclipInstanceRootForAdapter());
   const policy = resolvePrimeModelPolicy(ctx.config, configured, native);
+  // TAI-273 §3.2: fail closed before any file is written.
+  const binding = resolvePrimeManagedConnection(ctx.config, { mode: configured.credential.mode, provider: configured.provider, allowedModels: policy.allowedModels });
   const { cwd, env: paperclipEnv } = await buildPaperclipRunEnv(ctx, configured);
-  const { env: childEnv } = buildPrimeChildEnv(process.env, configured.agentDir, paperclipEnv);
+  const { env: childEnv } = buildPrimeChildEnv(process.env, configured.agentDir, paperclipEnv, { stripAnthropicEnv: binding !== null });
   const runtime = { ...configured, command: await resolvePrimeCommand(configured.command, childEnv) };
   throwIfAborted(ctx);
   const version = await readPrimeVersion({ command: runtime.command, env: childEnv, cwd });
@@ -111,6 +119,7 @@ async function prepareRun(ctx: AdapterExecutionContext, startedAtMs: number, nat
     throw new PrimeCliError("prime_cli_version_unsupported", `prime-agent ${version} is not supported; supported range is >= ${min} and < ${maxExclusive}.`);
   }
   throwIfAborted(ctx);
+  if (binding) track.managed = { agentDir: runtime.agentDir.agentDir, binding };
   const seeded = await seedPrimeAgentDir(runtime.agentDir, { provider: runtime.provider, env: paperclipEnv });
   throwIfAborted(ctx);
   assertPrimeModelListed(runtime.modelRef, await listPrimeModels({ command: runtime.command, env: childEnv, cwd }));
@@ -232,7 +241,7 @@ function mapResult(attempt: Attempt, prep: PreparedRun, clearSession: boolean): 
   }
   if (parsed.errors.length > 0 || proc.exitCode !== 0) {
     const message = parsed.errors[0] ?? (firstNonEmptyLine(proc.stderr) || `prime-agent exited with code ${proc.exitCode}`);
-    return { ...base, exitCode: failedExitCode, errorCode: "prime_run_failed", errorMessage: message };
+    return { ...base, exitCode: failedExitCode, errorCode: primeProviderErrorCode(proc.stdout) ?? "prime_run_failed", errorMessage: message };
   }
   const sessionId = clearSession ? null : parsed.sessionId;
   const sessionParams: PrimeSessionParams | null = sessionId
@@ -280,12 +289,25 @@ async function runPrime(
   return mapResult(audited(first), prep, false);
 }
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
+  const track: RunTrack = { managed: null, preflight: true };
+  let result: AdapterExecutionResult;
+  try {
+    result = await executeRun(ctx, track);
+  } catch (err) {
+    if (track.managed) await fs.rm(path.join(track.managed.agentDir, "auth.json"), { force: true }).catch(() => undefined);
+    throw err;
+  }
+  if (!track.managed) return result;
+  const onLog = (line: string) => ctx.onLog("stdout", line);
+  return await finishPrimeManagedCredential(result, { ...track.managed, preflight: track.preflight, onLog });
+}
+async function executeRun(ctx: AdapterExecutionContext, track: RunTrack): Promise<AdapterExecutionResult> {
   const startedAtMs = Date.now();
   let prep: PreparedRun;
   let native: PrimeNativeConfig;
   try {
     native = resolvePrimeNativeConfig(ctx.config);
-    prep = await prepareRun(ctx, startedAtMs, native);
+    prep = await prepareRun(ctx, startedAtMs, native, track);
   } catch (err) {
     return preflightFailure(err);
   }
@@ -298,6 +320,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     return preflightFailure(err);
   }
   const sources = await startPrimeAudit(prep.runtime.agentDir.sessionDir);
+  track.preflight = false;
   let result: AdapterExecutionResult;
   try {
     await ctx.onCancellationReady?.(); // A18: the host registers the execution control here

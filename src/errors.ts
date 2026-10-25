@@ -72,7 +72,11 @@ export type PrimePolicyErrorCode =
   /** api_key mode: after the run auth.json is not a regular 0600 file holding only the configured provider. */
   | "prime_auth_tampered"
   /** An actor ran a model outside allowedModels, or an actor's model could not be read. */
-  | "prime_model_audit_failed";
+  | "prime_model_audit_failed"
+  /** TAI-273 §3.2: fail closed on the managed Claude subscription connection, before any file is written. */
+  | "prime_managed_connection_invalid"
+  /** TAI-273 §3.2: auth.json could not be deleted after a managed_subscription run. */
+  | "prime_auth_cleanup_failed";
 
 export class PrimePolicyError extends Error {
   readonly code: PrimePolicyErrorCode;

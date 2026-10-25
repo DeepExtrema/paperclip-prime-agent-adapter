@@ -3,6 +3,7 @@ import type { ServerAdapterModule } from "@paperclipai/adapter-utils";
 import { agentConfigurationDoc, models, type } from "../index.js";
 import { getPrimeConfigSchema } from "./config-schema.js";
 import { execute } from "./execute.js";
+import "./managed-connection.js"; // TAI-273 §3.2: registers prime_agent_local for the anthropic subscription connection at load
 import {
   detectPrimeModelForAdapter,
   listPrimeModelsForAdapter,

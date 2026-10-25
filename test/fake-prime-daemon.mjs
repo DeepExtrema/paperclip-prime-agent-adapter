@@ -118,7 +118,11 @@ async function handle(socket, id, command) {
   if (needSession && !s) return fail(`Unknown active session: ${command.activeSessionId}`);
   switch (command.type) {
     case "list": return env.FAKE_DAEMON_BAD_ROSTER ? ok({ sessions: null }) : ok({ sessions: [...sessions.values()].map(summary) });
-    case "create": return ok(summary(create(command)));
+    case "create": {
+      const authFile = path.join(command.config?.agentDir ?? "", "auth.json");
+      record({ kind: "auth_at_create", auth: existsSync(authFile) ? JSON.parse(readFileSync(authFile, "utf8")) : null });
+      return ok(summary(create(command)));
+    }
     case "attach": s.clients.add(socket); return ok({ activeSessionId: s.id, snapshot: { activeSessionId: s.id, summary: summary(s), messages: [] } });
     case "detach": s.clients.delete(socket); return ok();
     case "set_thinking_level": s.thinking = command.level; return ok();
@@ -159,9 +163,18 @@ async function handle(socket, id, command) {
         if (env.FAKE_DAEMON_AUDIT_CHILD_NO_FILE === "1") rmSync(child.sessionFile, { force: true });
         emit(s, { type: "rlm_child_update", child: { activeSessionId: child.id, status: "done" } });
       }
+      if (env.FAKE_DAEMON_AUTH_DIR === "1") {
+        // TAI-273 §3.2: a tool replaces auth.json with a non-empty directory, so the adapter can neither check nor delete it.
+        rmSync(path.join(s.config.agentDir, "auth.json"), { force: true });
+        mkdirSync(path.join(s.config.agentDir, "auth.json", "x"), { recursive: true });
+      }
       if (mode === "error") {
         const error = env.FAKE_DAEMON_PROMPT_ERROR ?? "No API key found for anthropic.";
-        for (const e of [{ type: "agent_start" }, { type: "turn_start" }, { type: "turn_end", error }, { type: "agent_end" }]) emit(s, e);
+        // N0 item 14: a provider failure is an assistant message with stopReason "error" and diagnostics[0].details.kind.
+        const kind = env.FAKE_DAEMON_PROMPT_DIAGNOSTIC;
+        const failed = kind ? [{ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: error,
+          diagnostics: [{ type: "provider_stream_failure", details: { kind, status: kind === "auth" ? 401 : 429 } }] } }] : [];
+        for (const e of [{ type: "agent_start" }, { type: "turn_start" }, ...failed, { type: "turn_end", error }, { type: "agent_end" }]) emit(s, e);
         return fail(error);
       }
       s.streaming = true;

@@ -9,7 +9,10 @@ import {
 import { PrimeCliError, PrimeConfigError, PrimeCredentialError, type PrimeCredentialErrorCode } from "../errors.js";
 import { PRIME_SUPPORTED_VERSION_RANGE, type EphemeralPrimeAgentDir, type PrimeCheckCode, type PrimeRuntimeConfig } from "../types.js";
 import { resolvePrimeNativeConfig } from "./execute-daemon.js";
-import { resolvePrimeModelPolicy } from "./model-policy.js";
+import {
+  checkPrimeManagedConfig, hasPrimeManagedBinding, primeManagedRegistration, primeManagedToken, resolvePrimeManagedConnection,
+} from "./managed-connection.js";
+import { resolvePrimeModelPolicy, type PrimeModelPolicy } from "./model-policy.js";
 import { assertPrimeModelListed, listPrimeModels } from "./models.js";
 import {
   assertPrimeCwdAllowed,
@@ -65,12 +68,34 @@ export async function testEnvironment(ctx: AdapterEnvironmentTestContext): Promi
   }
 
   let runtime: PrimeRuntimeConfig;
+  let policy: PrimeModelPolicy;
   try {
     runtime = resolvePrimeRuntimeConfig(ctx.config, { id: ENVIRONMENT_TEST_AGENT_ID, companyId: ctx.companyId }, resolvePaperclipInstanceRootForAdapter());
-    resolvePrimeModelPolicy(ctx.config, runtime, resolvePrimeNativeConfig(ctx.config)); // TAI-225 §9: allowedModels and modelRoles
+    policy = resolvePrimeModelPolicy(ctx.config, runtime, resolvePrimeNativeConfig(ctx.config)); // TAI-225 §9: allowedModels and modelRoles
   } catch (err) {
     checks.push({ code: configCheckCode(err), level: "error", message: errorMessage(err) });
     return finish();
+  }
+  // TAI-273 §3.2: the registration record, the fail-closed rule, and checks 1-3 when the body carries the token. No hello probe.
+  const managed = runtime.credential.mode === "managed_subscription";
+  if (managed) {
+    const { registered, message } = primeManagedRegistration();
+    checks.push({ code: registered ? "prime_auth_managed_registered" : "prime_auth_managed_unregistered", level: registered ? "info" : "error", message });
+  }
+  if (managed || hasPrimeManagedBinding(ctx.config)) {
+    const carried = hasPrimeManagedBinding(ctx.config) || primeManagedToken(ctx.config) !== undefined;
+    const input = { mode: runtime.credential.mode, provider: runtime.provider, allowedModels: policy.allowedModels };
+    try {
+      if (carried) {
+        resolvePrimeManagedConnection(ctx.config, input);
+        if (managed) checks.push({ code: "prime_auth_managed_token_ok", level: "info", message: "The managed Claude subscription token matches the connection identity (value not shown). Only a run proves Anthropic accepts it." });
+      } else {
+        checkPrimeManagedConfig(ctx.config, input);
+      }
+    } catch (err) {
+      checks.push({ code: "prime_managed_connection_invalid", level: "error", message: errorMessage(err) });
+      return finish();
+    }
   }
 
   const cwd = runtime.cwd ?? process.cwd();
@@ -124,7 +149,9 @@ export async function testEnvironment(ctx: AdapterEnvironmentTestContext): Promi
 
     let credentialReady = false;
     try {
-      if (runtime.credential.mode === "api_key") {
+      if (runtime.credential.mode === "managed_subscription") {
+        // Checked above; the token is never written to a temporary dir.
+      } else if (runtime.credential.mode === "api_key") {
         await seedPrimeAgentDir(ephemeral.plan, { provider: runtime.provider, env: runtime.env });
         const message = `API key from env var ${runtime.credential.apiKeyEnvVar} is set (value not shown).`;
         checks.push({ code: "prime_auth_api_key", level: "info", message });
@@ -140,6 +167,11 @@ export async function testEnvironment(ctx: AdapterEnvironmentTestContext): Promi
     }
 
     if (!cliFound || !versionSupported || !credentialReady) return finish();
+    if (managed) {
+      const message = "Model listing skipped: the managed Claude subscription token is written to the agent's own Prime dir only during a run. The first run checks the model.";
+      checks.push({ code: "prime_models_skipped", level: "info", message });
+      return finish();
+    }
     if (runtime.credential.mode === "host_auth") {
       const message = "Model listing skipped: the host Prime login is never linked into a temporary dir (Prime 0.10 replaces the link when it refreshes). The first run checks the model.";
       checks.push({ code: "prime_models_skipped", level: "info", message });
