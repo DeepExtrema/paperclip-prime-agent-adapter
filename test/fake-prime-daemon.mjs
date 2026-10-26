@@ -240,6 +240,16 @@ async function handle(socket, id, command) {
       if (!child || env.FAKE_DAEMON_END_FAILS === "1") return ok({ deleted: false, reason: child ? "refused" : "unknown" });
       if (child.running) return ok({ deleted: false, reason: "running" });
       endSession(child);
+      // FAKE_DAEMON_DELETE_UPDATE=1 (0.10.1, TAI-324 F4 r20b): the delete sends one update on the parent that names the child by
+      // its sessionId, with no sessionFile. FAKE_DAEMON_DELETE_UPDATE_ID: that id instead (an id that matches no session file), or
+      // "live-sibling": the sessionId of another depth >= 1 session that is still live.
+      if (env.FAKE_DAEMON_DELETE_UPDATE === "1") {
+        const sibling = [...sessions.values()].find((c) => (c.depth ?? 0) >= 1 && c !== child);
+        const named = env.FAKE_DAEMON_DELETE_UPDATE_ID === "live-sibling" ? sibling?.sessionId : env.FAKE_DAEMON_DELETE_UPDATE_ID;
+        const update = { id: child.rlmChildId, activeSessionId: named ?? child.sessionId, status: "cancelled", error: "Deleted by parent orchestrator" };
+        record({ kind: "delete_update", child: update });
+        emit(s, { type: "rlm_child_update", child: update });
+      }
       return ok({ deleted: true });
     }
     case "attach": s.clients.add(socket); return ok({ activeSessionId: s.id, snapshot: { activeSessionId: s.id, summary: summary(s), messages: [] } });

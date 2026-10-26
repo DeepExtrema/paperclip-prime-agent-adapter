@@ -48,6 +48,7 @@ const STEP_FAILURES: Array<[string, Record<string, string>, string]> = [
 type Over = { config?: Record<string, unknown>; env?: Record<string, string>; sessionParams?: Record<string, unknown> | null; runId?: string; agentId?: string };
 async function run(over: Over = {}) {
   const logs: string[] = [];
+  const notes: string[] = [];
   const ctx: AdapterExecutionContext = {
     runId: over.runId ?? "run-1",
     agent: { id: over.agentId ?? "agent-1", companyId: "company-1", name: "Prime Tester", adapterType: "prime_agent_local", adapterConfig: {} },
@@ -61,9 +62,10 @@ async function run(over: Over = {}) {
     context: { paperclipWorkspace: { cwd: ws(), source: "project_primary" }, taskId: "task-1" },
     authToken: "run-jwt-token",
     onLog: async (_stream, chunk) => void logs.push(chunk),
+    onMeta: async (meta) => void notes.push(...(meta.commandNotes ?? [])),
   };
   const result = await execute(ctx);
-  return { result, logs, log: logs.join(""), report: (result.resultJson as { featureProfile?: Record<string, any> } | undefined)?.featureProfile! };
+  return { result, logs, notes, log: logs.join(""), report: (result.resultJson as { featureProfile?: Record<string, any> } | undefined)?.featureProfile! };
 }
 beforeEach(() => {
   root = mkdtempSync(path.join(os.tmpdir(), "prime-g6-"));
@@ -344,6 +346,42 @@ describe("item 2: sessions per run, keyed by sessionId", () => {
     expect(again.result).toMatchObject({ errorCode: "prime_subagent_limit_exceeded", clearSession: false });
     expect(again.log).toContain("was seen running again");
   });
+  // TAI-324 F4: on 0.10.1, deleting a woken old child sends one rlm_child_update that names it by its sessionId, with no file.
+  const wokenOverCap = (env: Record<string, string> = {}) =>
+    resumeAfter([1, 1], { config: { maxSubagentsPerRun: 1 }, env: { FAKE_DAEMON_WAKE_OLD_MS: "100", FAKE_DAEMON_PROMPT_DELAY_MS: "800", FAKE_DAEMON_DELETE_UPDATE: "1", ...env } });
+  it("ends a woken old child over the cap, and its sessionId-named update on delete is the audited file, not a missing one (TAI-324 F4)", async () => {
+    const { second, commands: ran } = await wokenOverCap();
+    expect(records().filter((r) => r.kind === "delete_update")).toHaveLength(1);
+    expect(second.result).toMatchObject({ exitCode: 0, errorCode: null, clearSession: false, sessionParams: expect.any(Object) });
+    expect(second.report.sessionsEnded).toEqual([{ sessionId: expect.any(String), depth: 1, reason: "limit" }]);
+    expect(ran.filter((c) => c.type === "delete_rlm_subagent")).toHaveLength(1);
+    const ended = second.report.sessionsEnded[0].sessionId;
+    const audit = (second.result.resultJson as { modelAudit: { ok: boolean; unreadable: unknown[]; actors: Array<{ sessionId: string; depth: number; file: string }> } }).modelAudit;
+    expect(audit).toMatchObject({ ok: true, unreadable: [] });
+    expect(audit.actors.filter((a) => a.sessionId === ended)).toEqual([expect.objectContaining({ depth: 1, file: expect.stringMatching(new RegExp(`${ended}\\.jsonl$`)) })]);
+    expect(second.log).not.toContain("no session file");
+    // The run-end stats loop asks about that id too. The ended child's live id is not asked, so its usage is missing (as on 0.10.1).
+    expect(ran.filter((c) => c.type === "get_session_stats" && c.activeSessionId === ended)).toHaveLength(1);
+    expect((second.result.resultJson as { usageNote?: string }).usageNote).toBe("child usage not reported");
+  });
+  it("does not ask get_session_stats about a sessionId whose live activeSessionId it asks too (TAI-347)", async () => {
+    const { second, commands: ran } = await wokenOverCap({ FAKE_DAEMON_DELETE_UPDATE_ID: "live-sibling" });
+    const named = records().find((r) => r.kind === "delete_update") as unknown as { child: { activeSessionId: string } };
+    expect(second.result).toMatchObject({ exitCode: 0, errorCode: null, clearSession: false });
+    const audit = (second.result.resultJson as { modelAudit: { ok: boolean; actors: Array<{ sessionId: string }> } }).modelAudit;
+    expect(audit.ok).toBe(true);
+    expect(audit.actors.map((a) => a.sessionId)).toContain(named.child.activeSessionId);
+    const asked = ran.filter((c) => c.type === "get_session_stats").map((c) => c.activeSessionId);
+    expect(asked).not.toContain(named.child.activeSessionId);
+    expect(asked.length).toBeGreaterThanOrEqual(3); // before, after and the live sibling
+    expect((second.result.resultJson as { usageNote?: string }).usageNote).toBeUndefined();
+  });
+  it("still fails the model audit for a child update with no file whose id matches no audited file (TAI-324 F4 control)", async () => {
+    const { second } = await wokenOverCap({ FAKE_DAEMON_DELETE_UPDATE_ID: "no-such-session" });
+    expect(records().filter((r) => r.kind === "delete_update")).toHaveLength(1);
+    expect(second.result).toMatchObject({ errorCode: "prime_model_audit_failed", clearSession: true });
+    expect(second.result.errorMessage).toContain("actor no-such-session: the daemon reported this child but no session file for it");
+  });
   it("audits depth-0 sessions with allowedModels set, without governed-v1 too (§7 item 9)", async () => {
     writeFileSync(path.join(root, "host-auth.json"), JSON.stringify({ anthropic: { type: "oauth", access: "a", refresh: "r", expires: 0 } }), { mode: 0o600 });
     const { result } = await run({ config: { featureProfile: undefined, credentialMode: undefined, apiKeyEnvVar: undefined,
@@ -532,6 +570,9 @@ describe("item 12: the model catalog and the parent's thinking level", () => {
     expect(settings()).toMatchObject({ defaultThinkingLevel: "medium" });
     const next = await run({ runId: "run-2" });
     expect(next.result.errorCode).toBeNull();
+    // A run-start note, so it is in commandNotes (onMeta), not on the log stream (Sentry, TAI-324 rev 14 line).
+    expect(next.notes).toContain("settings.json: restored managed keys changed since the last run: defaultThinkingLevel.");
+    expect((next.result.resultJson as { settings: { restoredKeys: string[] } }).settings.restoredKeys).toEqual(["defaultThinkingLevel"]);
     expect(JSON.parse(records().filter((r) => r.kind === "start")[1]!.settings!)).toMatchObject({ defaultThinkingLevel: "high" });
     expect(settings()).toMatchObject({ defaultThinkingLevel: "high" });
   });

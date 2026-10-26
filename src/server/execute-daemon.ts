@@ -512,6 +512,8 @@ async function runAttempt(
   let session: SessionSummary | null = null;
   let autonomousStatus: unknown = null;
   const childIds = new Set<string>();
+  /** activeSessionId to sessionId, from roster rows (TAI-347). */
+  const sessionOf = new Map<string, string>();
   const childStatus = new Map<string, { status: string; snapshotAfter: number }>();
   let rosterRequests = 0;
   let childUsageMissing = false;
@@ -788,6 +790,7 @@ async function runAttempt(
         onLog: (line) => emit(line),
         onRow: (row) => {
           if (row.workerPid !== null) daemon.workers.add(row.workerPid);
+          sessionOf.set(row.activeSessionId, row.sessionId);
           if (row.sessionId !== parentRef.sessionId) notePrimeChild(sources, row.activeSessionId, { sessionFile: row.sessionFile, depth: row.depth });
         },
         checkSession: (row) => checkPrimeSkillList(client, row.activeSessionId, explicitDirs, false),
@@ -837,6 +840,7 @@ async function runAttempt(
           const id = str(row.activeSessionId);
           if (id) childIds.add(id);
           else childUsageMissing = true;
+          if (id && str(row.sessionId)) sessionOf.set(id, str(row.sessionId)!);
         }
       }
       const parent = rows.find(row => row.activeSessionId === sid);
@@ -864,7 +868,11 @@ async function runAttempt(
     const after = readStats(await client.request({type : "get_session_stats", activeSessionId : sid}, 30_000));
     const statsDelta = delta(before, after);
     if (statsDelta) notePrimeParent(sources, { tokens: statsDelta.total });
+    // TAI-347: 0.10.1 names a deleted woken old child by its sessionId, which get_session_stats does not know. Skip that id
+    // when the same session's live activeSessionId is asked here too; else its usage is missing, and the note says so.
+    const askedLive = (id: string) => [...sessionOf].some(([active, sessionId]) => sessionId === id && active !== id && childIds.has(active));
     for (const childId of childIds) {
+      if (askedLive(childId)) continue;
       const childResponse = await client.request({type : "get_session_stats", activeSessionId : childId}, 30_000).catch(() => null);
       const childStats = readStats(childResponse);
       notePrimeChild(sources, childId, { tokens: childStats?.total ?? null,

@@ -348,7 +348,7 @@ function readActor(file: string, buffer: Buffer, start: number, target: Target) 
     depth: typeof header.rlmDepth === "number" ? header.rlmDepth : target.depth,
     file, models: [...counts.keys()].sort(), turns, turnsWithoutModel, tokens: target.tokens,
   };
-  return { actor, counts, badLines };
+  return { actor, counts, badLines, headerId: typeof header.id === "string" ? header.id : null };
 }
 
 export async function auditPrimeModels(sources: PrimeAuditSources, allowedModels: string[] | null): Promise<PrimeModelAudit> {
@@ -358,9 +358,12 @@ export async function auditPrimeModels(sources: PrimeAuditSources, allowedModels
   if (parent?.sessionFile) {
     targets.set(path.resolve(parent.sessionFile), { activeSessionId: null, sessionId: parent.sessionId, depth: 0, tokens: parent.tokens, noTurnPossible: !parent.prompted });
   }
+  // Judged once the files are read (TAI-347): a child with no file whose id is an audited file's header id is that session.
+  const fileless: string[] = [];
+  const headerIds = new Set<string>();
   for (const [activeSessionId, child] of sources.children) {
     if (!child.sessionFile) {
-      audit.unreadable.push({ sessionId: null, activeSessionId, file: null, reason: "the daemon reported this child but no session file for it" });
+      fileless.push(activeSessionId);
       continue;
     }
     targets.set(path.resolve(child.sessionFile), { activeSessionId, sessionId: null, depth: child.depth, tokens: child.tokens });
@@ -389,8 +392,9 @@ export async function auditPrimeModels(sources: PrimeAuditSources, allowedModels
       continue;
     }
     const before = sources.snapshot.get(file)?.size ?? 0;
-    const { actor, counts, badLines } = readActor(file, buffer, before <= buffer.length ? before : 0, target);
+    const { actor, counts, badLines, headerId } = readActor(file, buffer, before <= buffer.length ? before : 0, target);
     audit.actors.push(actor);
+    if (headerId) headerIds.add(headerId);
     const who = { sessionId: actor.sessionId, activeSessionId: actor.activeSessionId };
     if (badLines > 0) audit.unreadable.push({ ...who, file, reason: `${badLines} line(s) are not JSON` });
     if (actor.turnsWithoutModel > 0) audit.unreadable.push({ ...who, file, reason: `${actor.turnsWithoutModel} assistant turn(s) have no provider or model` });
@@ -400,6 +404,11 @@ export async function auditPrimeModels(sources: PrimeAuditSources, allowedModels
     if (allowedModels !== null) {
       for (const [model, turns] of counts) if (!allowedModels.includes(model)) audit.forbidden.push({ ...who, depth: actor.depth, model, turns });
     }
+  }
+  // 0.10.1's update for a deleted woken old child names it by its sessionId, with no file (TAI-324 F4).
+  for (const activeSessionId of fileless) {
+    if (headerIds.has(activeSessionId)) continue;
+    audit.unreadable.push({ sessionId: null, activeSessionId, file: null, reason: "the daemon reported this child but no session file for it" });
   }
   audit.ok = audit.forbidden.length === 0 && audit.unreadable.length === 0;
   return audit;
