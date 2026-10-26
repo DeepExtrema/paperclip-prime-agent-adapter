@@ -39,6 +39,46 @@ export async function readPrimeSkillName(source: string): Promise<string | null>
   return null;
 }
 
+/**
+ * TAI-365: a top-level frontmatter line whose plain value holds ": " (or ends in ":") is invalid YAML. Prime 0.10.1 then
+ * reads no description ("description is required" in the snapshot diagnostics) and drops the skill. Such values are
+ * double-quoted, unchanged otherwise. Returns the new SKILL.md text and the quoted keys, or null when nothing needs quoting.
+ */
+export function quotePrimeFrontmatter(text: string): { text: string; keys: string[] } | null {
+  const lines = text.split("\n");
+  if (lines[0]?.replace(/\r$/, "") !== "---") return null;
+  const keys: string[] = [];
+  for (let i = 1; i < lines.length; i += 1) {
+    const line = lines[i]!.replace(/\r$/, "");
+    if (line.trim() === "---") break;
+    const match = /^([A-Za-z_][A-Za-z0-9_-]*):[ \t]+(.*?)[ \t]*$/.exec(line);
+    if (!match) continue;
+    const [, key, value] = match as unknown as [string, string, string];
+    // Quoted, block, flow and alias values are left alone, and so is a plain value that continues on the next line.
+    if (/^["'|>[{&*!%@`#]/.test(value) || /^[ \t]+\S/.test(lines[i + 1] ?? "")) continue;
+    if (!value.includes(": ") && !value.endsWith(":")) continue;
+    lines[i] = `${key}: ${JSON.stringify(value)}${lines[i]!.endsWith("\r") ? "\r" : ""}`;
+    keys.push(key);
+  }
+  return keys.length > 0 ? { text: lines.join("\n"), keys } : null;
+}
+
+/** The staged dir for one skill: a symlink to the source, or, when its frontmatter needs quoting, a real dir with the new SKILL.md and a symlink per other entry. */
+async function stageSkillDir(source: string, target: string, runtimeName: string, logLines: string[]): Promise<void> {
+  const text = await fs.readFile(path.join(source, "SKILL.md"), "utf8").catch(() => null);
+  const quoted = text === null ? null : quotePrimeFrontmatter(text);
+  if (quoted === null) {
+    await fs.symlink(source, target);
+    return;
+  }
+  await fs.mkdir(target);
+  await fs.writeFile(path.join(target, "SKILL.md"), quoted.text);
+  for (const name of await fs.readdir(source)) {
+    if (name !== "SKILL.md") await fs.symlink(path.join(source, name), path.join(target, name));
+  }
+  logLines.push(`[paperclip] Skill "${runtimeName}" is staged with its frontmatter ${quoted.keys.map((key) => `"${key}"`).join(", ")} quoted: an unquoted ": " is invalid YAML, and Prime drops the skill.\n`);
+}
+
 type NamedEntry = { key: string; runtimeName: string; source: string };
 /**
  * TAI-273 §4.1 (G1): the dir name each skill is staged under. Prime needs a skill's name to equal its dir name, so the
@@ -113,7 +153,7 @@ export const stagePrimeSkills: StagePrimeSkills = async (config) => {
   try {
     for (const entry of staging) {
       const target = path.join(root, names.get(entry.key)!);
-      await fs.symlink(entry.source, target);
+      await stageSkillDir(entry.source, target, entry.runtimeName, logLines);
       skillDirs.push(target);
     }
   } catch (err) {

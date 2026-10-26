@@ -1021,6 +1021,20 @@ describe("item 10: the skill list, in the parent and in every other session", ()
   it("fails the parent check when the snapshot cannot be read, or an explicit skill is missing", async () => {
     expect((await run({ env: { FAKE_DAEMON_SNAPSHOT_FAILS: "1" } })).result.errorCode).toBe("prime_skill_list_invalid");
   });
+  it("TAI-365: loads all 12 of Vega's skills, summarize-status with its description quoted, and the parent check passes", async () => {
+    const names = readdirSync(fixture("vega-skills")).sort();
+    const skills = names.map((name) => ({ key: `vega/${name}`, runtimeName: name, source: path.join(fixture("vega-skills"), name) }));
+    const { result, log } = await run({ config: { paperclipRuntimeSkills: skills, paperclipSkillSync: { desiredSkills: skills.map((skill) => skill.key) } } });
+    expect(names).toHaveLength(12);
+    expect(result).toMatchObject({ exitCode: 0, errorCode: null });
+    const created = commands().find((c) => c.type === "create") as unknown as { config: { skills: string[] } };
+    expect(created.config.skills.filter((dir) => !BUILTINS.includes(dir)).map((dir) => path.basename(dir)).sort()).toEqual([
+      "agent-browser", "issue-triage", "paperclip", "paperclip-board", "paperclip-capsules", "qa-acceptance", "reflection-coach",
+      "simplified-english", "status-card-query", "summarize-status", "task-planning", "wireframe",
+    ]);
+    expect(log).toContain('[paperclip] Skill "summarize-status--61a9e96dc6" is staged with its frontmatter "description" quoted');
+    expect(log).not.toContain("skill list check failed");
+  });
   it("checks every other session and ends one that found a skill; the run goes on", async () => {
     const found = "/home/someone/.agents/skills/omarchy";
     const { result, report, log } = await run({ env: { FAKE_DAEMON_SPAWN: "[0, 1]", FAKE_DAEMON_PROMPT_DELAY_MS: "800", FAKE_DAEMON_CHILD_SKILLS: JSON.stringify([found]) } });

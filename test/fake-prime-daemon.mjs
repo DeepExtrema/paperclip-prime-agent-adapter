@@ -223,8 +223,16 @@ async function handle(socket, id, command) {
         : [...(s.config.skills ?? []), ...(env.FAKE_DAEMON_FOUND_SKILLS_SCOPE === "new" && !s.fresh ? [] : JSON.parse(env.FAKE_DAEMON_FOUND_SKILLS ?? "[]"))];
       if (env.FAKE_DAEMON_SNAPSHOT_FAILS === "1") return fail("snapshot unavailable");
       const agents = path.join(s.cwd ?? "", "AGENTS.md");
-      return ok({ skills: found.map((dir) => ({ name: path.basename(dir), filePath: path.join(dir, "SKILL.md"), sourceInfo: { baseDir: dir } })),
-        contextFiles: existsSync(agents) ? [{ path: agents }] : [], prompts: [], themes: [], diagnostics: { skills: [], prompts: [], themes: [] } });
+      // TAI-365 (N0 e34): real Prime drops a skill whose frontmatter description is a plain value holding ": " (invalid YAML).
+      const invalid = (dir) => {
+        const file = path.join(dir, "SKILL.md");
+        if (!existsSync(file)) return false;
+        const value = /^description:[ \t]+(.*)$/m.exec(readFileSync(file, "utf8").split(/\n---/)[0] ?? "")?.[1] ?? "";
+        return !/^["'>|]/.test(value) && value.includes(": ");
+      };
+      return ok({ skills: found.filter((dir) => !invalid(dir)).map((dir) => ({ name: path.basename(dir), filePath: path.join(dir, "SKILL.md"), sourceInfo: { baseDir: dir } })),
+        contextFiles: existsSync(agents) ? [{ path: agents }] : [], prompts: [], themes: [],
+        diagnostics: { skills: found.filter(invalid).map((dir) => ({ type: "warning", message: "description is required", path: path.join(dir, "SKILL.md") })), prompts: [], themes: [] } });
     }
     case "roster_subscribe":
       subscribers.add(socket);

@@ -215,6 +215,10 @@ So a fresh daemon adopts, stops, starts and resumes nothing from another daemon'
 - Each `startId` equals `proc:<field 22 of /proc/<pid>/stat>`, and each pid leads its own process group.
 - Both shells were still running after an adapter-style stop (TAI-339 `t4`). The script then killed them.
 
+### 19. TAI-365: frontmatter Prime drops (e34, e35)
+
+**A plain frontmatter value that holds `": "` makes Prime drop the skill** (e34). The real `summarize-status` SKILL.md has `description: Write a short, colloquial summary for a Paperclip summary slot: open with the 1–3 …`, unquoted. Passed by path, it is not in `get_resource_snapshot` `skills`; `diagnostics.skills` holds `{ type: "warning", message: "description is required", path }`. The same file with the description double-quoted, or with `": "` replaced, loads. With only the en dash replaced it still fails, and a short description loads, so the en dash and the length are not the cause. e35 staged 12 real skill sources (the Vega set of 2026-10-26) with `stagePrimeSkills` after the fix: all 12 loaded, `diagnostics.skills` was empty.
+
 ## New facts the plan does not have
 
 1. **A daemon start reaches GitHub.** At daemon start, Prime opened 3 HTTPS connections to `raw.githubusercontent.com` (refused here). The binary names `PrimeIntellect-ai/prime-agent-catalog/main/models/catalog.v1.json` and a `plugins/catalog.v…` file. Offline, `anthropic/claude-opus-5-5` resolves as a model with `reasoning: false`, because the bundled `models.bundled.json` holds fixtures only. So the live model list, and Opus 5.5's thinking support, come from that fetch. `--offline` ("Disable startup network operations") exists; I did not test it in daemon mode.

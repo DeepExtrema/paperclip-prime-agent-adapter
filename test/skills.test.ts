@@ -3,7 +3,9 @@ import os from "node:os";
 import path from "node:path";
 import type { AdapterSkillContext } from "@paperclipai/adapter-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { listPrimeSkills, stagePrimeSkills, syncPrimeSkills } from "../src/server/skills.js";
+import { fileURLToPath } from "node:url";
+import { checkPrimeSkillList } from "../src/server/skill-list.js";
+import { listPrimeSkills, quotePrimeFrontmatter, stagePrimeSkills, syncPrimeSkills } from "../src/server/skills.js";
 
 let base: string;
 let sources: string;
@@ -150,5 +152,57 @@ describe("G1: skills staged under their frontmatter name (TAI-273 §4.1)", () =>
     const snapshot = await listPrimeSkills(ctx(skillConfig([extra[0]!.key], extra)));
     const entry = snapshot.entries.find((candidate) => candidate.key === extra[0]!.key);
     expect(entry).toMatchObject({ runtimeName: "simplified-english--9876d8956d", locationLabel: "Prime skill name: simplified-english" });
+  });
+});
+
+describe("TAI-365: frontmatter Prime cannot parse", () => {
+  const VEGA = fileURLToPath(new URL("./fixtures/vega-skills", import.meta.url));
+  const SUMMARIZE = "Write a short, colloquial summary for a Paperclip summary slot: open with the 1–3 specific, concrete actions the reader needs to take right now to unblock the work, then a brief plain-language status, streaming progress as it works.";
+  it("double-quotes a plain value holding \": \", and leaves every other line alone", () => {
+    const text = `---\nname: summarize-status\ndescription: ${SUMMARIZE}\nkey: a/b\ntags:\n  - x: y\n---\n# body: here\n`;
+    expect(quotePrimeFrontmatter(text)).toEqual({ text: text.replace(SUMMARIZE, JSON.stringify(SUMMARIZE)), keys: ["description"] });
+    expect(quotePrimeFrontmatter("---\r\ndescription: a: b\r\n---\r\n")).toEqual({ text: '---\r\ndescription: "a: b"\r\n---\r\n', keys: ["description"] });
+    expect(quotePrimeFrontmatter("---\ntitle: ends with:\n---\n")?.keys).toEqual(["title"]);
+  });
+  it("returns null for quoted, block and continued values, values without \": \", and text without frontmatter", () => {
+    for (const text of [
+      '---\ndescription: "a: b"\n---\n', "---\ndescription: 'a: b'\n---\n", "---\ndescription: >\n  a: b\n---\n",
+      "---\ndescription: a: b\n  continued\n---\n", "---\ndescription: a:b and a - b\n---\n", "description: a: b\n", "# a: b\n",
+    ]) expect(quotePrimeFrontmatter(text)).toBeNull();
+  });
+  it("stages all 12 of Vega's skills: 11 as symlinks, summarize-status as a dir with the quoted SKILL.md and a symlink per other entry", async () => {
+    // Vega's skill set on 2026-10-26: 7 desired + 5 company-required. Frontmatter verbatim; summarize-status gets an extra file.
+    await fs.cp(VEGA, path.join(base, "vega"), { recursive: true });
+    await fs.writeFile(path.join(base, "vega", "summarize-status--61a9e96dc6", "notes.md"), "extra\n");
+    const names = (await fs.readdir(path.join(base, "vega"))).sort();
+    const entries = names.map((name) => ({ key: `vega/${name}`, runtimeName: name, source: path.join(base, "vega", name) }));
+    const staged = await stagePrimeSkills({ paperclipRuntimeSkills: entries, paperclipSkillSync: { desiredSkills: entries.map((entry) => entry.key) } });
+    expect(names).toHaveLength(12);
+    expect(staged.skillDirs).toHaveLength(12);
+    expect(staged.missing).toEqual([]);
+    for (const dir of staged.skillDirs) {
+      const quoted = quotePrimeFrontmatter(await fs.readFile(path.join(dir, "SKILL.md"), "utf8"));
+      expect(quoted, dir).toBeNull(); // every staged SKILL.md is one Prime can parse
+      expect((await fs.lstat(dir)).isSymbolicLink(), dir).toBe(path.basename(dir) !== "summarize-status");
+    }
+    const summarize = path.join(path.dirname(staged.skillDirs[0]!), "summarize-status");
+    const source = path.join(base, "vega", "summarize-status--61a9e96dc6");
+    expect(await fs.readFile(path.join(summarize, "SKILL.md"), "utf8")).toBe(
+      (await fs.readFile(path.join(source, "SKILL.md"), "utf8")).replace(`description: ${SUMMARIZE}`, `description: ${JSON.stringify(SUMMARIZE)}`));
+    expect(await fs.readlink(path.join(summarize, "notes.md"))).toBe(path.join(source, "notes.md"));
+    expect(staged.logLines).toContain('[paperclip] Skill "summarize-status--61a9e96dc6" is staged with its frontmatter "description" quoted: an unquoted ": " is invalid YAML, and Prime drops the skill.\n');
+    await staged.cleanup();
+    expect(await fs.readdir(tmp)).toEqual([]);
+    expect(await fs.readFile(path.join(source, "SKILL.md"), "utf8")).toContain(`description: ${SUMMARIZE}\n`); // the source is untouched
+  });
+  it("puts Prime's diagnostic for a missing explicit skill into the check's reason", async () => {
+    const dir = path.join(VEGA, "summarize-status--61a9e96dc6");
+    const other = path.join(VEGA, "paperclip");
+    const client = { request: async (command: { type: string }) => (command.type === "get_system_prompt" ? { success: true, data: {} } : { success: true, data: {
+      skills: [{ name: "paperclip", filePath: path.join(other, "SKILL.md") }], contextFiles: [],
+      diagnostics: { skills: [{ type: "warning", message: "description is required", path: path.join(dir, "SKILL.md") }] },
+    } }) };
+    const check = await checkPrimeSkillList(client, "s-1", [other, dir], true);
+    expect(check).toMatchObject({ ok: false, missing: [dir], reason: `explicit skills missing: ${dir} (Prime: description is required)` });
   });
 });

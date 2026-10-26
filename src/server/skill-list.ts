@@ -70,8 +70,18 @@ export async function checkPrimeSkillList(client: Requester, activeSessionId: st
     else notAllowed.push(dir ?? JSON.stringify(skill).slice(0, 200));
   }
   const missing = parent ? explicitDirs.filter((dir) => !seen.has(dir)) : [];
+  // TAI-365: Prime says why it dropped a skill only in diagnostics.skills ({ type, message, path }); that text goes into the reason.
+  const diagnostics = new Map<string, string[]>();
+  const skillDiagnostics = isObject(data.diagnostics) && Array.isArray(data.diagnostics.skills) ? data.diagnostics.skills : [];
+  for (const entry of skillDiagnostics) {
+    if (!isObject(entry) || typeof entry.path !== "string" || typeof entry.message !== "string") continue;
+    const dir = path.dirname(entry.path);
+    const match = allowed.get(path.resolve(dir)) ?? allowed.get(await realOrSame(dir));
+    if (match) diagnostics.set(match, [...(diagnostics.get(match) ?? []), entry.message]);
+  }
+  const withDiagnostics = (dir: string) => (diagnostics.has(dir) ? `${dir} (Prime: ${diagnostics.get(dir)!.join("; ")})` : dir);
   const reason = parent && data.skills.length === 0 ? "the skill list is empty"
     : notAllowed.length > 0 ? `skills not on the list: ${notAllowed.join(", ")}`
-    : missing.length > 0 ? `explicit skills missing: ${missing.join(", ")}` : null;
+    : missing.length > 0 ? `explicit skills missing: ${missing.map(withDiagnostics).join(", ")}` : null;
   return { ok: reason === null, notAllowed, missing, contextFiles, reason };
 }

@@ -33,3 +33,7 @@ All captured with `env -i HOME=$HOME PATH=... PRIME_AGENT_TELEMETRY=0 PRIME_AGEN
 | `model-list.txt` | `prime-agent model list` | `auth.json` symlinked to the host `~/.prime/agent/auth.json` (anthropic 16, openai-codex 17, vercel-ai-gateway 242 rows). The host file's size, mtime and inode were unchanged afterwards. |
 | `model-list-api-key-anthropic.txt` | `prime-agent model list` | per-agent `auth.json` = `{"anthropic":{"type":"api_key","key":"<fake>"}}` (mode 0600): 16 anthropic rows, so Prime accepts this file shape. Note the narrower columns. |
 | `model-list-no-auth.txt` | `prime-agent model list` | empty dir: "No models available" message, exit 0. Redacted: the home directory in the two doc paths is replaced by `/home/user` (L13). |
+
+## `vega-skills/` (TAI-365, 2026-10-26)
+
+The 12 skills Vega had when its first Prime run failed: its 7 desired skills (`paperclip`, `paperclip-board`, `wireframe`, `agent-browser`, `simplified-english`, `task-planning`, `summarize-status`) and the 5 company-required ones (`issue-triage`, `paperclip-capsules`, `qa-acceptance`, `reflection-coach`, `status-card-query`). Dir names are the host runtime names. Each `SKILL.md` keeps the source frontmatter byte for byte; the body is cut to one heading and one line. `summarize-status` has the unquoted `": "` in its description that Prime 0.10.1 cannot parse (N0 e34).
