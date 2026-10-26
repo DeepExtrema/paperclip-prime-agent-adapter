@@ -104,8 +104,10 @@ export async function waitForPrimeCatalog(client: Requester, activeSessionId: st
  * the catalog lands keeps its model with no reasoning; set_thinking_level then changes what get_state shows but not the
  * request (get_state cannot tell the two apart). set_model puts the catalog entry on the session, so its answer must be that
  * entry. null when the answer passes and get_state shows the configured level. No set_thinking_level is sent here.
+ * onState gets get_state's data, for G3 item 6's backstop.
  */
-export async function confirmPrimeThinkingLevel(client: Requester, activeSessionId: string, modelRef: string, thinking: string, record: PrimeModelCatalogRecord): Promise<string | null> {
+export async function confirmPrimeThinkingLevel(client: Requester, activeSessionId: string, modelRef: string, thinking: string, record: PrimeModelCatalogRecord,
+  onState?: (data: Record<string, unknown>) => void): Promise<string | null> {
   const slash = modelRef.indexOf("/");
   const [provider, id] = [modelRef.slice(0, slash), modelRef.slice(slash + 1)];
   const set = await client.request({ type: "set_model", activeSessionId, provider, modelId: id }, 30_000)
@@ -119,6 +121,7 @@ export async function confirmPrimeThinkingLevel(client: Requester, activeSession
   if (entry) return `set_model answered ${entry}`;
   const state = await client.request({ type: "get_state", activeSessionId }, 30_000)
     .catch((err: unknown) => ({ success: false, error: err instanceof Error ? err.message : String(err), data: undefined }));
+  if (state.success && isObject(state.data)) onState?.(state.data);
   const level = state.success && isObject(state.data) && typeof state.data.thinkingLevel === "string" ? state.data.thinkingLevel : null;
   record.thinkingLevel = level;
   if (level === thinking) return null;

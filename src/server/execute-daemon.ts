@@ -387,6 +387,8 @@ type Outcome = {
   stage: Stage; error: string | null; stdout: string; parsed: ParsedPrimeOutput; session: SessionSummary | null;
   lastText: string | null; statsDelta: StatsDelta | null; autonomousStatus: unknown; usageNote?: string;
   violation?: PrimeTrackerViolation;
+  /** G3 item 6: the backstop fired, so a turn ran and no result may claim providerWorkStarted: false. */
+  backstopFired?: boolean;
 };
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const str = (value: unknown) => (typeof value === "string" && value.length > 0 ? value : null);
@@ -468,6 +470,22 @@ async function readGoalState(sessionFile: string): Promise<{ goal: Record<string
   }
   return { goal, clears };
 }
+/** G3 item 6's backstop: the `message` entries in a session file, read before create. null when the file cannot be read. */
+async function countMessageEntries(sessionFile: string): Promise<number | null> {
+  const text = await fs.readFile(sessionFile, "utf8").catch(() => null);
+  if (text === null) return null;
+  let count = 0;
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      if ((JSON.parse(line) as { type?: unknown }).type === "message") count += 1;
+    } catch {
+      // a line cut by a crash
+    }
+  }
+  return count;
+}
+
 function pendingStop(ctx: AdapterExecutionContext, prep: PreparedRun): StopReason|null {
   if (ctx.signal?.aborted) return "cancelled";
   return prep.deadlineMs !== null && Date.now() >= prep.deadlineMs ? "timed_out" : null;
@@ -507,6 +525,9 @@ async function runAttempt(
   let catalogParent: string | null = null;
   let catalogPoll: NodeJS.Timeout | null = null;
   let catalogChecking: Promise<void> | null = null;
+  // G3 item 6: the `message` entries of the file the last create resumed (0 for a fresh session), and whether the backstop fired.
+  let messagesBeforeCreate: number | null = 0;
+  let backstopFired = false;
   /** During the run, a failed check aborts the turn, and the run fails with no clearSession (the daemon stops in executeDaemon). */
   const recheckCatalog = (): Promise<void> => {
     if (!catalog || !catalog.ok || catalogParent === null || violation) return Promise.resolve();
@@ -547,6 +568,7 @@ async function runAttempt(
       lastText : null,
       statsDelta : null,
       autonomousStatus,
+      backstopFired,
       ...extra
     };
   };
@@ -599,6 +621,7 @@ async function runAttempt(
     const foreign = savedGoal && (savedGoal.status === "active" || savedGoal.status === "paused")
       && savedGoal.objective !== native.goal?.objective ? savedGoal : null;
     const createSession = async (sessionPath: string | null): Promise<SessionSummary | { error: string; code: string | null }> => {
+      messagesBeforeCreate = sessionPath ? await countMessageEntries(sessionPath) : 0;
       const created = await client.request({ type: "create", lifecycle: "resident", config, ...(sessionPath ? { sessionPath } : {}) }, 60_000);
       const summary = created.success ? readSummary(created.data) : null;
       if (!summary) return { error: created.error ?? `Unexpected create response: ${JSON.stringify(created).slice(0, 300)}`, code: errorInfoCode(created) };
@@ -606,19 +629,25 @@ async function runAttempt(
       notePrimeParent(sources, { sessionId: summary.sessionId, sessionFile: summary.sessionFile });
       return summary;
     };
+    const mustFor = (summary: SessionSummary) => async (command: Record<string, unknown>&{type : string}) => {
+      const response = await client.request({...command, activeSessionId : summary.activeSessionId}, 30_000);
+      if (!response.success)
+        throw new PrimeDaemonError("prime_daemon_protocol_error",
+                                   `${command.type} failed: ${response.error ?? "no error text"}`);
+      return response;
+    };
+    // Under governed-v1 this write is harmless: defaultThinkingLevel is a managed key with this value (rev 11, item 1).
+    const setThinking = async (summary: SessionSummary) => {
+      if (runtime.thinking !== null && summary.thinkingLevel !== runtime.thinking)
+        await mustFor(summary)({type : "set_thinking_level", level : runtime.thinking});
+    };
     const setUp = async (summary: SessionSummary) => {
-      const must = async (command: Record<string, unknown>&{type : string}) => {
-        const response = await client.request({...command, activeSessionId : summary.activeSessionId}, 30_000);
-        if (!response.success)
-          throw new PrimeDaemonError("prime_daemon_protocol_error",
-                                     `${command.type} failed: ${response.error ?? "no error text"}`);
-        return response;
-      };
+      const must = mustFor(summary);
       if (summary.provider !== runtime.provider || summary.model !== runtime.model)
         await must({type : "set_model", provider : runtime.provider, modelId : runtime.model});
-      // Under governed-v1 this write is harmless: defaultThinkingLevel is a managed key with this value (rev 11, item 1).
-      if (runtime.thinking !== null && summary.thinkingLevel !== runtime.thinking)
-        await must({type : "set_thinking_level", level : runtime.thinking});
+      // TAI-273 rev 15: under governed-v1 the first set_thinking_level waits for item 12's catalog check (confirmThinking),
+      // so the level is known supported and Prime never clamps-and-saves it. No model turn runs before then.
+      if (!governed) await setThinking(summary);
       if (native.rlmMaxDepth !== null) await must({type : "set_rlm_max_depth", maxDepth : native.rlmMaxDepth});
     };
     const explicitDirs = [...prep.skills.skillDirs, ...prep.builtinSkillDirs];
@@ -633,8 +662,20 @@ async function runAttempt(
     };
     // TAI-273 §2.2 item 12: the allowed models in the catalog, and the parent's thinking level, before the first prompt.
     const allowedModels = prep.policy.allowedModels ?? [];
-    const confirmThinking = async (summary: SessionSummary): Promise<string | null> =>
-      (catalog && runtime.thinking !== null ? await confirmPrimeThinkingLevel(client, summary.activeSessionId, `${runtime.provider}/${runtime.model}`, runtime.thinking, catalog) : null);
+    // Called only once the catalog check has passed: the deferred set_thinking_level (rev 15), then set_model and get_state.
+    const confirmThinking = async (summary: SessionSummary, onState?: (data: Record<string, unknown>) => void): Promise<string | null> => {
+      if (!catalog || runtime.thinking === null) return null;
+      await setThinking(summary);
+      return await confirmPrimeThinkingLevel(client, summary.activeSessionId, `${runtime.provider}/${runtime.model}`, runtime.thinking, catalog, onState);
+    };
+    // G3 item 6's backstop (rev 15, TAI-344 change 2): at item 12's get_state, a turn the adapter did not start shows as isStreaming,
+    // or as more messages than the file held before create (a short replayed turn has ended by then; N7 case 1: 6 over 2).
+    const replayVia = (state: Record<string, unknown> | null): "isStreaming" | "messageCount" | null => {
+      if (!state) return null;
+      if (state.isStreaming === true) return "isStreaming";
+      if (typeof state.messageCount === "number" && messagesBeforeCreate !== null && state.messageCount > messagesBeforeCreate) return "messageCount";
+      return null;
+    };
     const catalogFailed = (problem: string) => {
       catalog!.ok = false;
       catalog!.failure = problem;
@@ -669,8 +710,31 @@ async function runAttempt(
     }
     if (governed) {
       catalog = governed.live.modelCatalog = { ok: false, checks: 0, refreshesSeen: 0, liveModel: null, thinkingLevel: null, failure: null };
-      const problem = await waitForPrimeCatalog(client, session.activeSessionId, allowedModels, runtime.thinking, catalog)
-        ?? await confirmThinking(session);
+      const seen: { state: Record<string, unknown> | null } = { state: null };
+      let problem = await waitForPrimeCatalog(client, session.activeSessionId, allowedModels, runtime.thinking, catalog)
+        ?? await confirmThinking(session, (data) => { seen.state = data; });
+      const via = replayVia(seen.state);
+      if (via) {
+        // As item 7 does for a goal it cannot clear: end the session, then a fresh one gets item 10's check and item 12's steps.
+        backstopFired = true;
+        const earlier = governed.interruptedSession?.sessionId === session.sessionId ? governed.interruptedSession : null;
+        governed.interruptedSession = { ...earlier, sessionId: session.sessionId, detectedVia: via };
+        const text = `Prime session ${session.sessionId} ran a turn the adapter did not start (${via}); starting a fresh session.`;
+        governed.live.warnings.push(text);
+        emit(`[paperclip] warning: ${text}\n`);
+        await client.request({ type: "kill", activeSessionId: session.activeSessionId }, 30_000);
+        const fresh = await createSession(null);
+        if ("error" in fresh) return await outcome("create_failed", fresh.error);
+        session = fresh;
+        await setUp(session);
+        resumed = false;
+        const freshProblem = await checkParent(session);
+        if (freshProblem) {
+          emit(`[paperclip] ${freshProblem}\n`);
+          return await outcome("skill_list_failed", freshProblem, { session: null });
+        }
+        problem = await confirmThinking(session);
+      }
       if (problem) return await outcome("catalog_failed", catalogFailed(problem), { session: null });
       catalog.ok = true;
     }
@@ -853,14 +917,13 @@ function mapResult(o: Outcome, prep: PreparedRun, daemon: RunDaemon, clearSessio
     clearSession,
   };
   const fail = (errorCode: string, errorMessage: string): AdapterExecutionResult => ({ ...base, errorCode, errorMessage });
+  // G3 item 6: once the backstop fired, a turn ran in this run, so no failure claims providerWorkStarted: false (TAI-344 change 2).
+  const bootstrap = o.backstopFired ? {} : { executionRecovery: { kind: "bootstrap" as const, providerWorkStarted: false as const } };
   switch (o.stage) {
     case "policy_failed": return fail(o.violation!.code, o.violation!.message);
-    case "session_busy": return { ...fail("prime_session_busy", o.error ?? "The Prime session is held by another process."),
-      executionRecovery: { kind: "bootstrap", providerWorkStarted: false } };
-    case "skill_list_failed": return { ...fail("prime_skill_list_invalid", o.error ?? "The Prime skill list check failed."),
-      executionRecovery: { kind: "bootstrap", providerWorkStarted: false } };
-    case "catalog_failed": return { ...fail("prime_model_catalog_invalid", o.error ?? "The Prime model catalog check failed."),
-      executionRecovery: { kind: "bootstrap", providerWorkStarted: false } };
+    case "session_busy": return { ...fail("prime_session_busy", o.error ?? "The Prime session is held by another process."), ...bootstrap };
+    case "skill_list_failed": return { ...fail("prime_skill_list_invalid", o.error ?? "The Prime skill list check failed."), ...bootstrap };
+    case "catalog_failed": return { ...fail("prime_model_catalog_invalid", o.error ?? "The Prime model catalog check failed."), ...bootstrap };
     case "timed_out": return { ...fail("prime_run_timeout", `Timed out after ${runtime.timeoutSec}s${o.error ? `: ${o.error}` : ""}`), exitCode: null, timedOut: true };
     case "cancelled": return fail("prime_run_cancelled", "Run cancelled.");
     case "closed": return fail("prime_run_uncertain", `Prime daemon connection lost; the run outcome is uncertain. ${o.error}`);

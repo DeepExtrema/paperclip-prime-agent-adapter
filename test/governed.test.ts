@@ -445,9 +445,10 @@ describe("item 12: the model catalog and the parent's thinking level", () => {
     expect(report.modelCatalog).toMatchObject({ ok: true, refreshesSeen: 0, thinkingLevel: "high", failure: null });
     expect(report.modelCatalog.checks).toBeGreaterThan(1);
     expect(requests().map((r) => r.thinking)).toEqual(["high"]);
-    // The first set_thinking_level (after create, which the stale session ignores) stays; none is sent after the catalog check.
-    expect(types().slice(types().indexOf("get_model_catalog"))).not.toContain("set_thinking_level");
-    expect(types().lastIndexOf("get_model_catalog")).toBeLessThan(types().indexOf("set_model"));
+    // Rev 15: the one set_thinking_level is deferred until the catalog check passes, then set_model (the race in change 1).
+    expect(types().filter((t) => t === "set_thinking_level")).toHaveLength(1);
+    expect(types().lastIndexOf("get_model_catalog")).toBeLessThan(types().indexOf("set_thinking_level"));
+    expect(types().indexOf("set_thinking_level")).toBeLessThan(types().indexOf("set_model"));
     expect(report.modelCatalog.liveModel).toEqual(LIVE);
     // settings.json after the run equals the managed keys plus recentModels (rev 11).
     expect(settings()).toEqual({ ...JSON.parse(records().find((r) => r.kind === "start")!.settings!), recentModels: [MODEL] });
@@ -508,8 +509,14 @@ describe("item 12: the model catalog and the parent's thinking level", () => {
     expect(report.modelCatalog).toMatchObject({ ok: false, failure });
     expect(log).toContain(`[paperclip] Prime model catalog check failed: ${failure}`);
     expect(types()).not.toContain("prompt_and_wait");
-    expect(types().slice(types().indexOf("get_model_catalog"))).not.toContain("set_thinking_level");
+    // No second set_thinking_level: the deferred first one (rev 15) comes before set_model, none after it.
+    expect(types().slice(types().indexOf("set_model"))).not.toContain("set_thinking_level");
   });
+  it("sends no set_thinking_level when the catalog check fails (rev 15: deferred until it passes)", async () => {
+    const { result } = await run({ config: { thinking: "high" }, env: { FAKE_DAEMON_CATALOG_READY_MS: "60000", FAKE_DAEMON_THINKING_RACE: "1" } });
+    expect(result).toMatchObject(bootstrap);
+    expect(types()).not.toContain("set_thinking_level");
+  }, 30_000);
   it("fails prime_settings_tampered with clearSession when set_model writes another defaultThinkingLevel and item 12 then fails (rev 13)", async () => {
     const { result, report, log } = await run({ env: { FAKE_DAEMON_SET_MODEL_CLAMP: "medium" } });
     expect(result).toMatchObject({ errorCode: "prime_settings_tampered", clearSession: true,
@@ -624,7 +631,7 @@ describe("item 11: the agent dir is an allowlist; the catalog caches are deleted
     write(path.join(agentDir(), "models.json"), '{"providers":{}}');
     write(path.join(agentDir(), "extensions", "x.ts"), "x");
     write(path.join(agentDir(), "persistent-shells", "s.json"), "{}");
-    for (const name of ["session-leases", "rlm-ledger", "logs", "daemon-workers"]) write(path.join(agentDir(), name, "kept.json"), "{}");
+    for (const name of ["session-leases", "rlm-ledger", "logs"]) write(path.join(agentDir(), name, "kept.json"), "{}");
     write(path.join(agentDir(), "telemetry.json"), "{}");
     const { result, report, log } = await run();
     expect(result.errorCode).toBeNull();
@@ -634,7 +641,7 @@ describe("item 11: the agent dir is an allowlist; the catalog caches are deleted
     ]);
     expect(readFileSync(disabled("models.json"), "utf8")).toBe('{"providers":{}}');
     expect(existsSync(path.join(agentDir(), "models.json"))).toBe(false);
-    for (const name of ["session-leases", "rlm-ledger", "logs", "daemon-workers", "telemetry.json"]) expect(existsSync(path.join(agentDir(), name))).toBe(true);
+    for (const name of ["session-leases", "rlm-ledger", "logs", "telemetry.json"]) expect(existsSync(path.join(agentDir(), name))).toBe(true);
     expect(report.warnings).toEqual(expect.arrayContaining(["extensions", "models.json", "persistent-shells"].map((n) => `agent-dir entry off the keep-list moved aside: ${n}`)));
     expect(log).toContain("[paperclip] warning: agent-dir entry off the keep-list moved aside: models.json");
   });
@@ -651,6 +658,114 @@ describe("item 11: the agent dir is an allowlist; the catalog caches are deleted
     const second = await run({ runId: "run-2" });
     expect(second.report.cachesCleared).toEqual([{ name: "mcp-service-catalog.v2.json", sha256: null }]);
     expect(readFileSync(target, "utf8")).toBe("keep me");
+  });
+});
+
+describe("G3 item 6: recovery journals are deleted at run start, and item 12's get_state is the backstop (rev 15)", () => {
+  /** A 0.10.1 recovery journal as N7 (TAI-346) found it: state records and a queue snapshot holding the cut prompt. */
+  const journal = (busy: boolean, sessionId = "01a174fc-old", operation = busy ? "prompt_accepted" : "turn_end") => [
+    { activeSessionId: "dae63767296d", sessionId, sessionFile: "/old.jsonl", busy: true, operation: "create", recordedAt: "t0" },
+    { version: 2, type: "queue_snapshot", active_session_id: "dae63767296d", steering: [{ message: "the cut prompt" }], follow_up: [], recorded_at: "t1" },
+    { activeSessionId: "dae63767296d", sessionId, sessionFile: "/old.jsonl", busy, operation, recordedAt: "t2" },
+  ].map((record) => `${JSON.stringify(record)}\n`).join("");
+  const workers = (...parts: string[]) => path.join(agentDir(), "daemon-workers", ...parts);
+  const workersAtCreate = () => records().filter((r) => r.kind === "daemon_workers_at_create").map((r) => (r as unknown as { exists: boolean }).exists);
+  const secondRunCommands = () => commands().slice(commands().flatMap((c, index) => (c.type === "create" ? [index] : []))[1]);
+  async function resume(env: Record<string, string> = {}, before: (sessionFile: string) => void = () => undefined) {
+    const first = await run();
+    before(String(first.result.sessionParams!.sessionFile));
+    return { first, second: await run({ runId: "run-2", sessionParams: first.result.sessionParams!, env }) };
+  }
+
+  it("logs a busy journal, sets interruptedSession, deletes daemon-workers/ and resumes the same sessionId with sessionPath", async () => {
+    const { first, second } = await resume({}, () => {
+      write(workers("509bc496826a", "dae63767296d.recovery.jsonl"), journal(true));
+      write(workers("509bc496826a", "supervisor-config"), "{}");
+    });
+    expect(second.result).toMatchObject({ exitCode: 0, errorCode: null, clearSession: false, sessionId: first.result.sessionId });
+    expect(second.report.interruptedSession).toEqual({ sessionId: "01a174fc-old", operation: "prompt_accepted" });
+    const line = "Prime session 01a174fc-old was interrupted mid-turn (prompt_accepted); dropping the recovery journal.";
+    expect(second.log.split("\n").filter((l) => l === `[paperclip] warning: ${line}`)).toHaveLength(1);
+    expect(second.report.warnings).toEqual([line]);
+    expect(secondRunCommands()[0]).toMatchObject({ type: "create", sessionPath: first.result.sessionParams!.sessionFile });
+  });
+  it("deletes daemon-workers/ before the daemon starts, and does not move it to .paperclip-disabled/", async () => {
+    write(workers("w1", "a.recovery.jsonl"), journal(true));
+    const { result, report } = await run();
+    expect(result.errorCode).toBeNull();
+    expect(workersAtCreate()).toEqual([false]);
+    expect(existsSync(disabled("daemon-workers"))).toBe(false);
+    expect(report.agentDirDisabled).toEqual([]);
+  });
+  it("deletes a dir with no busy tail silently: no warning and no interruptedSession", async () => {
+    write(workers("w1", "a.recovery.jsonl"), journal(false));
+    write(workers("w1", "b.recovery.jsonl"), "{\"busy\":tr"); // a line cut by a crash
+    write(workers("w1", "a.recovery.jsonl.writer-lock"), "");
+    const { result, report, log } = await run();
+    expect(result.errorCode).toBeNull();
+    expect(existsSync(workers())).toBe(false);
+    expect(report).not.toHaveProperty("interruptedSession");
+    expect(report.warnings).toEqual([]);
+    expect(log).not.toContain("interrupted mid-turn");
+  });
+  it("removes a daemon-workers link without reading through it; its target stays", async () => {
+    const target = path.join(root, "elsewhere-workers");
+    write(path.join(target, "w1", "a.recovery.jsonl"), journal(true));
+    mkdirSync(agentDir(), { recursive: true });
+    symlinkSync(target, workers());
+    const { result, report } = await run();
+    expect(result.errorCode).toBeNull();
+    expect(existsSync(workers())).toBe(false);
+    expect(readFileSync(path.join(target, "w1", "a.recovery.jsonl"), "utf8")).toBe(journal(true));
+    expect(report).not.toHaveProperty("interruptedSession");
+  });
+  it("leaves daemon-workers/ untouched without governed-v1 (as on 1f8f816)", async () => {
+    write(workers("w1", "a.recovery.jsonl"), journal(true));
+    const { result, log } = await run({ config: { featureProfile: undefined } });
+    expect(result.errorCode).toBeNull();
+    expect(readFileSync(workers("w1", "a.recovery.jsonl"), "utf8")).toBe(journal(true));
+    expect(log).not.toContain("interrupted mid-turn");
+  });
+  it("does not fire the backstop when messageCount equals the file's message entries", async () => {
+    const message = (role: string) => `${JSON.stringify({ type: "message", id: role, message: { role, content: [{ type: "text", text: role }] } })}\n`;
+    const { first, second } = await resume({}, (file) => appendFileSync(file, message("user") + message("assistant")));
+    expect(second.result).toMatchObject({ errorCode: null, sessionId: first.result.sessionId });
+    expect(second.report).not.toHaveProperty("interruptedSession");
+    expect(secondRunCommands().map((c) => c.type)).not.toContain("kill");
+  });
+  it.each([["isStreaming", "streaming"], ["messageCount", "messages"]] as const)(
+    "on %s at item 12's get_state, kills the session and runs item 10's check and item 12's steps on a fresh one", async (via, replay) => {
+    const { first, second } = await resume({ FAKE_DAEMON_REPLAY: replay });
+    expect(second.result).toMatchObject({ exitCode: 0, errorCode: null, clearSession: false });
+    expect(second.result.sessionId).not.toBe(first.result.sessionId);
+    expect(second.report.interruptedSession).toEqual({ sessionId: first.result.sessionId, detectedVia: via });
+    const line = `Prime session ${String(first.result.sessionId)} ran a turn the adapter did not start (${via}); starting a fresh session.`;
+    expect(second.log).toContain(`[paperclip] warning: ${line}`);
+    expect(second.report.warnings).toEqual([line]);
+    const run2 = secondRunCommands();
+    const kill = run2.findIndex((c) => c.type === "kill");
+    expect(kill).toBeGreaterThan(run2.findIndex((c) => c.type === "get_state"));
+    expect(run2[kill]!.activeSessionId).toBe(run2.find((c) => c.type === "get_state")!.activeSessionId);
+    const after = run2.slice(kill + 1);
+    expect(after.filter((c) => c.type === "create")).toEqual([expect.not.objectContaining({ sessionPath: expect.anything() })]);
+    expect(after.map((c) => c.type).filter((t) => ["get_resource_snapshot", "set_model", "get_state", "attach", "prompt_and_wait"].includes(t)))
+      .toEqual(["get_resource_snapshot", "set_model", "get_state", "attach", "prompt_and_wait"]);
+    expect(second.report.modelCatalog).toMatchObject({ ok: true, thinkingLevel: "high" });
+  });
+  it.each(STEP_FAILURES.map(([name, env]) => [name, { ...env, FAKE_DAEMON_SET_MODEL_SCOPE: "new", ...(env.FAKE_DAEMON_THINKING_STUCK ? { FAKE_DAEMON_THINKING_STUCK: "new" } : {}) }] as const))(
+    "once the backstop fired, a failure in the fresh session (%s) does not claim providerWorkStarted: false", async (_name, env) => {
+    const { second } = await resume({ FAKE_DAEMON_REPLAY: "messages", ...env });
+    expect(second.result).toMatchObject({ errorCode: "prime_model_catalog_invalid", clearSession: false });
+    expect(second.result).not.toHaveProperty("executionRecovery");
+    expect(second.result.sessionParams).toBeUndefined();
+    expect(second.report.interruptedSession).toMatchObject({ detectedVia: "messageCount" });
+  });
+  it("a skill-list failure in the fresh session does not claim providerWorkStarted: false either", async () => {
+    const { second } = await resume({ FAKE_DAEMON_REPLAY: "streaming", FAKE_DAEMON_FOUND_SKILLS_SCOPE: "new",
+      FAKE_DAEMON_FOUND_SKILLS: JSON.stringify([path.join(root, "home", ".agents", "skills", "rogue")]) });
+    expect(second.result).toMatchObject({ errorCode: "prime_skill_list_invalid" });
+    expect(second.result).not.toHaveProperty("executionRecovery");
+    expect(second.report.interruptedSession).toMatchObject({ detectedVia: "isStreaming" });
   });
 });
 

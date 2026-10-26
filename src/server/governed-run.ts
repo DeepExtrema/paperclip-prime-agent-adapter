@@ -20,6 +20,8 @@ export interface MovedFile { path: string; sha256: Sha }
 export interface ForeignGoal { goalId: string | null; objective: string; status: string; action: "cleared" | "fresh_session" }
 /** Item 2 and item 10: a session the adapter ended, and why. */
 export interface SessionEnded { sessionId: string; depth: number; reason: "limit" | "skill_list"; skills?: string[] }
+/** G3 item 6 (rev 15): a session a crash left mid-turn (operation, from its recovery journal), or the backstop's finding (detectedVia). */
+export interface InterruptedSession { sessionId: string; operation?: string; detectedVia?: "isStreaming" | "messageCount" }
 
 /** Filled during the run by the daemon path (items 2, 7 and 10). */
 export interface GovernedRunLive {
@@ -59,6 +61,8 @@ export interface GovernedRunState {
   processesSwept: ProcessSwept[];
   /** Warnings found at run start (moves of entries an earlier run left). */
   startWarnings: string[];
+  /** G3 item 6: set at run start from a busy recovery journal, or by the daemon path's backstop. */
+  interruptedSession: InterruptedSession | null;
   live: GovernedRunLive;
 }
 
@@ -89,6 +93,7 @@ export interface GovernedReport {
   modelCatalog: PrimeModelCatalogRecord | null;
   persistentShellsKilled: PersistentShellKill[];
   processesSwept: ProcessSwept[];
+  interruptedSession?: InterruptedSession;
   warnings: string[];
 }
 
@@ -247,7 +252,7 @@ async function describe(file: string, name: string): Promise<DisabledEntry | nul
 /** Item 11: top-level agent-dir entries that stay. Every other entry moves aside at run start. */
 export const PRIME_AGENT_DIR_KEEP = [
   "settings.json", "auth.json", "sessions", "session-artifacts", "harness", "skills", "refinement_history.jsonl", "telemetry.json",
-  ".paperclip-disabled", "session-leases", "rlm-ledger", "logs", "daemon-workers",
+  ".paperclip-disabled", "session-leases", "rlm-ledger", "logs",
 ] as const;
 /** Item 11: the catalog caches, deleted at run start; the file hashed for each (`models/` is a dir). */
 const CATALOG_CACHES = [
@@ -273,6 +278,52 @@ async function enforceAgentDirAllowlist(state: GovernedRunState): Promise<void> 
     state.agentDirDisabled.push(entry);
     state.startWarnings.push(`agent-dir entry off the keep-list moved aside: ${name}`);
   }
+}
+
+/** G3 item 6: every regular `*.recovery.jsonl` under dir, at any depth. Links are not followed. */
+async function findRecoveryJournals(dir: string, into: string[] = []): Promise<string[]> {
+  for (const name of (await fs.readdir(dir)).sort()) {
+    const full = path.join(dir, name);
+    const entry = await lstat(full);
+    if (entry?.isDirectory()) await findRecoveryJournals(full, into);
+    else if (entry?.isFile() && name.endsWith(".recovery.jsonl")) into.push(full);
+  }
+  return into;
+}
+
+/** A journal's newest state record: the last line that parses and is not a queue snapshot. */
+async function journalTail(file: string): Promise<Record<string, unknown> | null> {
+  const lines = (await fs.readFile(file, "utf8").catch(() => "")).split("\n").filter((line) => line.trim() !== "").reverse();
+  for (const line of lines) {
+    try {
+      const record = JSON.parse(line) as unknown;
+      if (typeof record === "object" && record !== null && !Array.isArray(record) && (record as { type?: unknown }).type !== "queue_snapshot") return record as Record<string, unknown>;
+    } catch {
+      // a line cut by the crash
+    }
+  }
+  return null;
+}
+
+/**
+ * G3 item 6 (rev 15, TAI-344 change 1): a fresh daemon replays a crashed worker's recovery journal (N7, TAI-346), so the whole
+ * `daemon-workers/` is deleted. Runs after item 13's leftover check and G3 item 5's reap, so no process of this agent is alive.
+ */
+async function dropRecoveryJournals(state: GovernedRunState, onLog: (line: string) => Promise<void> | void): Promise<void> {
+  const root = path.join(state.agentDir, "daemon-workers");
+  const stat = await lstat(root);
+  if (!stat) return;
+  for (const file of stat.isDirectory() ? await findRecoveryJournals(root) : []) {
+    const tail = await journalTail(file);
+    if (tail?.busy !== true) continue;
+    const sessionId = typeof tail.sessionId === "string" ? tail.sessionId : "unknown";
+    const operation = typeof tail.operation === "string" ? tail.operation : "unknown";
+    state.interruptedSession ??= { sessionId, operation };
+    const text = `Prime session ${sessionId} was interrupted mid-turn (${operation}); dropping the recovery journal.`;
+    state.live.warnings.push(text); // logged here, so the run-end report does not log it again
+    await onLog(`[paperclip] warning: ${text}\n`);
+  }
+  await fs.rm(root, { recursive: true, force: true }); // a link is removed, its target left alone
 }
 
 /** Item 4: every scheduled-jobs.json under session-artifacts/, at any depth. */
@@ -362,7 +413,7 @@ const harnessKinds = async (agentDir: string): Promise<Array<{ kind: string; cou
   }
 };
 
-/** Run start, before Prime starts: items 4, 6, 8 (strip and refine stores), 9, 10 (workspace file), G3 item 5's reap and item 11. */
+/** Run start, before Prime starts: items 4, 6, 8 (strip and refine stores), 9, 10 (workspace file), G3 items 5 (reap) and 6 (journals), item 11. */
 export async function startGovernedRun(input: {
   profile: PrimeFeatureProfile; agentDir: string; cwd: string; runId: string; onLog?: (line: string) => Promise<void> | void;
 }): Promise<GovernedRunState> {
@@ -371,7 +422,7 @@ export async function startGovernedRun(input: {
   const state: GovernedRunState = {
     profile, agentDir, cwd, runId, disabledDir, agentSkillsDisabled: [], agentDirDisabled: [], contextFilesDisabled: [], projectConfigDisabled: [],
     scheduledJobsDisabled: 0, harnessEntriesDisabled: [], harnessBefore: null, refinementEventsBefore: 0, contextFilesBefore: new Map(),
-    cachesCleared: [], persistentShellsKilled: [], processesSwept: [], startWarnings: [],
+    cachesCleared: [], persistentShellsKilled: [], processesSwept: [], startWarnings: [], interruptedSession: null,
     live: { sessions: 0, sessionsEnded: [], sessionSkillChecks: 0, foreignGoals: [], skillDiscovery: "on", contextFiles: [], warnings: [], modelCatalog: null },
   };
   // Item 4: saved Prime schedules.
@@ -418,6 +469,8 @@ export async function startGovernedRun(input: {
   // G3 item 5: shells left by a crash end before item 11 moves persistent-shells/ (the reap reads those records).
   const reaped = await reapPersistentShells(agentDir, { when: "run_start", sessionIds: null, onLog: input.onLog ?? (() => undefined) });
   state.persistentShellsKilled.push(...reaped);
+  // G3 item 6: the recovery journals go before item 11, which would otherwise move daemon-workers/ aside.
+  await dropRecoveryJournals(state, input.onLog ?? (() => undefined));
   // Item 11, last: the catalog caches and every entry off the keep-list.
   await enforceAgentDirAllowlist(state);
   state.contextFilesBefore = await findContextFiles(cwd);
@@ -492,7 +545,8 @@ export async function finishGovernedRun(state: GovernedRunState, settingsKeysRem
     harnessEntriesDisabled: state.harnessEntriesDisabled, harnessBytes: await treeBytes(path.join(agentDir, "harness")),
     harnessFingerprint: { before: state.harnessBefore, after: await sha256File(path.join(agentDir, "harness", "harness_state.json")) },
     refinementEvents: { before: state.refinementEventsBefore, after: await lineCount(path.join(agentDir, "refinement_history.jsonl")) },
-    cachesCleared: state.cachesCleared, modelCatalog: state.live.modelCatalog, persistentShellsKilled: state.persistentShellsKilled, processesSwept: state.processesSwept, warnings,
+    cachesCleared: state.cachesCleared, modelCatalog: state.live.modelCatalog, persistentShellsKilled: state.persistentShellsKilled, processesSwept: state.processesSwept,
+    ...(state.interruptedSession ? { interruptedSession: state.interruptedSession } : {}), warnings,
   };
   return { report, workspaceFile: workspaceProblem };
 }

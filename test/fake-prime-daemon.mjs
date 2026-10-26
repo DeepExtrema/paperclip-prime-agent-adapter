@@ -60,6 +60,7 @@ const send = (socket, message) => { if (!socket.destroyed) socket.write(`${JSON.
 // set_model faults: FAKE_DAEMON_SET_MODEL_FAIL=1 answers success false; FAKE_DAEMON_SET_MODEL_ENTRY (JSON) is its answer instead
 // of the catalog entry; FAKE_DAEMON_SET_MODEL_CLAMP=<level> sets that level and writes it as defaultThinkingLevel (0.7.1's clamp).
 // FAKE_DAEMON_SET_MODEL_SCOPE=new limits them to a session created without sessionPath (item 7's fresh session).
+// FAKE_DAEMON_FOUND_SKILLS_SCOPE=new does the same for FAKE_DAEMON_FOUND_SKILLS (G3 item 6's fresh session).
 const startedAt = Date.now();
 const DEFAULT_CATALOG = ["claude-haiku-4-5", "claude-opus-4-7", "claude-opus-5-5"].map((id) => ({ provider: "anthropic", id, baseUrl: "https://api.anthropic.com", reasoning: true }));
 let refreshed = null;
@@ -123,7 +124,11 @@ function create(command, depth = 0) {
   const s = { id: `a${process.pid.toString(16)}${++nextSession}`.slice(0, 12), sessionId, sessionFile, cwd: config.cwd, config,
     provider: env.FAKE_DAEMON_MODEL_PROVIDER ?? config.provider ?? "anthropic", model: env.FAKE_DAEMON_MODEL_ID ?? config.model ?? "claude-opus-4-7",
     fresh: !sessionPath, stale, stuck, thinking: stale || stuck ? "off" : config.thinking ?? "medium", streaming: env.FAKE_DAEMON_STREAMING_AT_START === "1", prompted: false, messages: 0, seq: 0,
-    stats: initial, last: null, clients: new Set(), pending: null, rlmMaxDepth: 2 };
+    stats: initial, last: null, clients: new Set(), pending: null, rlmMaxDepth: 2,
+    // G3 item 6: the file's `message` entries; FAKE_DAEMON_REPLAY=streaming|messages makes a resumed session look like it is
+    // replaying a turn at get_state (isStreaming true, or 2 messages more than the file held).
+    fileMessages: sessionPath && existsSync(sessionPath) ? readFileSync(sessionPath, "utf8").split("\n").filter((l) => l.includes('"type":"message"')).length : 0,
+    replay: sessionPath ? env.FAKE_DAEMON_REPLAY ?? null : null };
   // A resumed parent's old sessions, from its ledger (N0 item 4): roster_subscribe lists each depth >= 1 one as an inactive
   // item with no activeSessionId, whose id is its sessionId (TAI-324 F2, Nexus n01); `list` does not list them.
   const ledger = `${sessionFile}.fake-ledger.json`;
@@ -206,6 +211,7 @@ async function handle(socket, id, command) {
     case "create": {
       const authFile = path.join(command.config?.agentDir ?? "", "auth.json");
       record({ kind: "auth_at_create", auth: existsSync(authFile) ? JSON.parse(readFileSync(authFile, "utf8")) : null });
+      record({ kind: "daemon_workers_at_create", exists: existsSync(path.join(command.config?.agentDir ?? "", "daemon-workers")) });
       const created = create(command);
       if (typeof created === "string") return fail(created);
       return ok(summary(created));
@@ -214,7 +220,7 @@ async function handle(socket, id, command) {
     case "get_resource_snapshot": {
       // TAI-273 §2.2 item 10 (N0 e31 shape): the parent lists its create config skills; another session only what it found.
       const found = s.discovered ? JSON.parse(env.FAKE_DAEMON_CHILD_SKILLS ?? "[]")
-        : [...(s.config.skills ?? []), ...JSON.parse(env.FAKE_DAEMON_FOUND_SKILLS ?? "[]")];
+        : [...(s.config.skills ?? []), ...(env.FAKE_DAEMON_FOUND_SKILLS_SCOPE === "new" && !s.fresh ? [] : JSON.parse(env.FAKE_DAEMON_FOUND_SKILLS ?? "[]"))];
       if (env.FAKE_DAEMON_SNAPSHOT_FAILS === "1") return fail("snapshot unavailable");
       const agents = path.join(s.cwd ?? "", "AGENTS.md");
       return ok({ skills: found.map((dir) => ({ name: path.basename(dir), filePath: path.join(dir, "SKILL.md"), sourceInfo: { baseDir: dir } })),
@@ -244,7 +250,8 @@ async function handle(socket, id, command) {
         mergeJson(path.join(s.config.agentDir, "settings.json"), { defaultThinkingLevel: command.level });
       }
       return ok();
-    case "get_state": return ok({ thinkingLevel: s.thinking, model: { provider: s.provider, id: s.model } });
+    case "get_state": return ok({ thinkingLevel: s.thinking, model: { provider: s.provider, id: s.model }, isStreaming: s.replay === "streaming",
+      messageCount: s.fileMessages + s.messages + (s.replay === "messages" ? 2 : 0) });
     case "get_model_catalog": return ok({ models: catalogModels() });
     case "set_model": {
       const faulty = env.FAKE_DAEMON_SET_MODEL_SCOPE !== "new" || s.fresh;
